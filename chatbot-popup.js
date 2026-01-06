@@ -14,6 +14,8 @@ class ChatbotPopup {
         this.isSpeaking = false;
         this.isMuted = false;
         this.isListening = false;
+        this.recognitionActive = false; // Track if recognition is actively listening
+        this._startingRecognition = false; // Flag to prevent multiple simultaneous starts
         this.selectedVoice = options.voice || null;
         this.voiceGender = options.voiceGender || null;
         this.voiceLang = options.voiceLang || 'en-US';
@@ -31,10 +33,14 @@ class ChatbotPopup {
         this.pendingAudio = null; // Preloaded next audio
         this.batchSize = 3; // Number of messages to batch together
         this.currentCaptions = []; // Track current batch captions for display
+        this.ttsStartTime = null; // Track when TTS started to filter out early false positives
     }
 
     init() {
         if (this.isInitialized) return;
+
+        // Initialize ChatGPT service
+        this.chatGPTService = new ChatGPTService();
 
         // Initialize TTS service
         this.initTTS();
@@ -85,27 +91,72 @@ class ChatbotPopup {
         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
         if (SpeechRecognition) {
             this.recognition = new SpeechRecognition();
-            this.recognition.continuous = false;
-            this.recognition.interimResults = false;
+            this.recognition.continuous = true; // Enable continuous recognition for interruption
+            this.recognition.interimResults = true; // Enable interim results to detect speech start
             this.recognition.lang = this.voiceLang;
             
+            // Detect when user speaks
             this.recognition.onresult = (event) => {
-                const transcript = event.results[0][0].transcript.trim();
-                if (this.waitingForResponse) {
-                    this.handleUserResponse(transcript);
-                } else {
-                    this.handleVoiceInput(transcript);
+                // Check if we have interim results (user is speaking)
+                let hasInterimResult = false;
+                let finalTranscript = '';
+                
+                for (let i = event.resultIndex; i < event.results.length; i++) {
+                    const result = event.results[i];
+                    if (result.isFinal) {
+                        finalTranscript = result[0].transcript.trim();
+                    } else {
+                        hasInterimResult = true;
+                        // User is speaking - check if we should interrupt
+                        if (this.isSpeaking) {
+                            // With AEC enabled, we still need a longer delay to let AEC fully adapt
+                            // AEC needs time to learn and filter out the TTS echo
+                            // Interim results are more reliable than onspeechstart for detecting real user speech
+                            const timeSinceTtsStart = this.ttsStartTime ? Date.now() - this.ttsStartTime : Infinity;
+                            // Increased to 3 seconds to give AEC more time to adapt and filter echo
+                            // Interim results give us more confidence it's real speech, not just echo
+                            if (timeSinceTtsStart > 3000) {
+                                console.log('User interruption detected during TTS (barge-in with AEC)');
+                                this.stopSpeaking();
+                            } else {
+                                console.log(`Ignoring speech detection (${timeSinceTtsStart}ms since TTS start - AEC adaptation period)`);
+                            }
+                        }
+                    }
+                }
+                
+                // Only process final results if chatbot is not speaking
+                // (or if we just interrupted, which sets isSpeaking to false)
+                if (finalTranscript && !hasInterimResult && !this.isSpeaking) {
+                    if (this.waitingForResponse) {
+                        this.handleUserResponse(finalTranscript);
+                    } else {
+                        this.handleVoiceInput(finalTranscript);
+                    }
+                }
+            };
+
+            // Note: We don't use onspeechstart for interruption anymore
+            // It fires too early and can't reliably distinguish TTS echo from user speech
+            // We rely on interim results in onresult instead, which gives us more context
+            this.recognition.onspeechstart = () => {
+                // Log for debugging but don't interrupt here
+                if (this.isSpeaking) {
+                    const timeSinceTtsStart = this.ttsStartTime ? Date.now() - this.ttsStartTime : Infinity;
+                    console.log(`Speech start detected (${timeSinceTtsStart}ms since TTS start) - waiting for interim results to confirm`);
                 }
             };
 
             this.recognition.onerror = (event) => {
                 console.error('Speech recognition error:', event.error);
+                // Don't stop on 'no-speech' errors during continuous recognition
+                if (event.error === 'no-speech') {
+                    return;
+                }
+                
                 let errorMessage = 'Voice input error. ';
                 
                 switch(event.error) {
-                    case 'no-speech':
-                        errorMessage = 'No speech detected. Please try again.';
-                        break;
                     case 'audio-capture':
                         errorMessage = 'No microphone found. Please check your microphone.';
                         break;
@@ -127,17 +178,18 @@ class ChatbotPopup {
             };
 
             this.recognition.onend = () => {
-                // Only restart if we're waiting for a response AND not speaking
-                if (this.waitingForResponse && !this.isSpeaking && !this.isListening) {
+                // Restart if still waiting for response and not speaking
+                if (this.waitingForResponse && !this.isSpeaking && !this.isHangingUp) {
                     try {
-                        this.isListening = true;
-                        this.recognition.start();
+                        this.startRecognition();
                     } catch (e) {
                         // Recognition already started or error
                         console.warn('Could not restart recognition:', e);
+                        this.recognitionActive = false;
                         this.isListening = false;
                     }
                 } else {
+                    this.recognitionActive = false;
                     this.isListening = false;
                 }
             };
@@ -620,6 +672,12 @@ class ChatbotPopup {
         const speechMessages = result.messages || result;
         this.waitingForResponse = (result && result.waitForResponse) || false;
         
+        // Start recognition early so it's ready to detect interruptions
+        // This will request microphone permission if needed
+        if (!this.recognitionActive && !this.isMuted && this.recognition) {
+            this.startRecognition();
+        }
+        
         // Start speaking after a brief connection delay
         setTimeout(() => {
             this.updateCaption("Connected. AI PC Protect Agent speaking...");
@@ -701,12 +759,8 @@ class ChatbotPopup {
         // Wait a bit to ensure TTS has fully stopped
         setTimeout(() => {
             if (this.recognition && this.waitingForResponse && !this.isSpeaking) {
-                try {
-                    this.isListening = true;
-                    this.recognition.start();
-                } catch (e) {
-                    console.warn('Could not start speech recognition:', e);
-                    this.isListening = false;
+                this.startRecognition();
+                if (!this.recognitionActive) {
                     this.showManualButtons();
                 }
             } else if (!this.recognition) {
@@ -998,6 +1052,11 @@ class ChatbotPopup {
         const typingId = this.showTypingIndicator();
 
         try {
+            // Ensure ChatGPT service is initialized
+            if (!this.chatGPTService) {
+                this.chatGPTService = new ChatGPTService();
+            }
+            
             // Send to ChatGPT
             console.log('Calling ChatGPT service...');
             const response = await this.chatGPTService.sendMessage(userMessage, this.contextData);
@@ -1130,8 +1189,18 @@ class ChatbotPopup {
             return;
         }
 
-        // Stop speech recognition to prevent it from hearing the TTS audio
-        this.stopListening();
+        // Keep recognition active for barge-in (interruption) with AEC enabled
+        // AEC (Acoustic Echo Cancellation) should filter out the chatbot's voice
+        // Track when TTS starts for additional safety filtering
+        this.ttsStartTime = Date.now();
+        
+        // Ensure recognition is active for interruption detection
+        // With AEC, we can keep it running during TTS
+        if (!this.recognitionActive && !this._startingRecognition && !this.isMuted && this.recognition) {
+            this.startRecognition().catch(err => {
+                console.warn('Failed to start recognition for interruption:', err);
+            });
+        }
 
         // Stop any ongoing speech and clear previous promise
         // This prevents old promises from resolving and processing the queue again
@@ -1168,6 +1237,8 @@ class ChatbotPopup {
                 this.isSpeaking = false;
                 this.currentSpeakingPromise = null;
                 this.stopWaveform();
+                // Resume recognition after TTS stops
+                this.resumeRecognitionIfNeeded();
                 // Process immediately for smooth transitions
                 this.processSpeechQueue();
             } else {
@@ -1181,6 +1252,8 @@ class ChatbotPopup {
                 this.isSpeaking = false;
                 this.currentSpeakingPromise = null;
                 this.stopWaveform();
+                // Resume recognition after TTS stops
+                this.resumeRecognitionIfNeeded();
                 // Minimal delay for error recovery
                 setTimeout(() => this.processSpeechQueue(), 50);
             }
@@ -1273,11 +1346,18 @@ class ChatbotPopup {
             return;
         }
 
-        // Check microphone permissions first
+        // Check microphone permissions first with Acoustic Echo Cancellation (AEC)
         try {
-            console.log('Requesting microphone permission...');
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            console.log('Microphone permission granted');
+            console.log('Requesting microphone permission with AEC...');
+            const stream = await navigator.mediaDevices.getUserMedia({ 
+                audio: {
+                    echoCancellation: true,      // Remove speaker output from mic input
+                    noiseSuppression: true,      // Reduce background noise
+                    autoGainControl: true,       // Normalize audio levels
+                    sampleRate: 44100            // High quality for better recognition
+                }
+            });
+            console.log('Microphone permission granted with AEC enabled');
             // Stop the stream immediately - we just needed permission
             stream.getTracks().forEach(track => track.stop());
         } catch (permissionError) {
@@ -1288,9 +1368,8 @@ class ChatbotPopup {
         }
 
         try {
-            this.isListening = true;
             console.log('Starting speech recognition...');
-            this.recognition.start();
+            this.startRecognition();
             console.log('Speech recognition started');
             
             const voiceBtn = document.getElementById('voiceBtn');
@@ -1323,6 +1402,7 @@ class ChatbotPopup {
 
     stopListening() {
         this.isListening = false;
+        this.recognitionActive = false;
         
         if (this.recognition) {
             try {
@@ -1341,6 +1421,112 @@ class ChatbotPopup {
         if (voiceStatus) {
             voiceStatus.textContent = this.isMuted ? 'Voice muted' : 'Voice enabled';
         }
+    }
+    
+    pauseRecognition() {
+        // Pause recognition (used when explicitly needed)
+        if (this.recognition && this.recognitionActive) {
+            try {
+                this.recognition.stop();
+                this.recognitionActive = false;
+                this.isListening = false;
+            } catch (e) {
+                // Already stopped
+                this.recognitionActive = false;
+                this.isListening = false;
+            }
+        }
+    }
+    
+    resumeRecognitionIfNeeded() {
+        // Recognition should already be active (we keep it active during TTS for interruption)
+        // This method is mainly for edge cases where recognition stopped unexpectedly
+        if (!this.isSpeaking && !this.isHangingUp && !this.isMuted && this.recognition) {
+            // Small delay to ensure TTS audio has fully stopped
+            setTimeout(() => {
+                if (!this.isSpeaking && !this.recognitionActive && !this._startingRecognition) {
+                    this.startRecognition();
+                }
+            }, 300);
+        }
+    }
+    
+    async startRecognition() {
+        // Prevent multiple simultaneous calls
+        if (this._startingRecognition) {
+            console.log('Recognition start already in progress, skipping...');
+            return;
+        }
+        
+        // Don't start if already active
+        if (this.recognitionActive) {
+            console.log('Recognition already active, skipping start');
+            return;
+        }
+        
+        if (this.recognition && !this.recognitionActive && !this.isMuted) {
+            this._startingRecognition = true;
+            
+            try {
+                // Request microphone permission with Acoustic Echo Cancellation (AEC)
+                // Only request if we don't already have permission (to avoid multiple prompts)
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ 
+                        audio: {
+                            echoCancellation: true,      // Remove speaker output from mic input
+                            noiseSuppression: true,      // Reduce background noise
+                            autoGainControl: true,       // Normalize audio levels
+                            sampleRate: 44100            // High quality for better recognition
+                        }
+                    });
+                    // Stop the stream immediately - we just needed permission
+                    stream.getTracks().forEach(track => track.stop());
+                    console.log('Microphone permission granted with AEC enabled');
+                } catch (permissionError) {
+                    // If permission was already granted, this might fail, but that's okay
+                    if (permissionError.name === 'NotAllowedError') {
+                        console.warn('Microphone permission not granted:', permissionError);
+                        const voiceStatus = document.getElementById('voiceStatus');
+                        if (voiceStatus) {
+                            voiceStatus.textContent = 'Microphone access needed for interruption';
+                        }
+                        this._startingRecognition = false;
+                        return;
+                    }
+                    // Other errors might be okay (e.g., already have permission)
+                    console.log('Microphone check:', permissionError.name);
+                }
+                
+                // Double-check we're still not active (race condition protection)
+                if (this.recognitionActive) {
+                    console.log('Recognition became active during permission check, skipping start');
+                    this._startingRecognition = false;
+                    return;
+                }
+                
+                this.recognitionActive = true;
+                this.isListening = true;
+                this.recognition.start();
+                console.log('Speech recognition started for interruption detection');
+            } catch (e) {
+                console.warn('Could not start speech recognition:', e);
+                this.recognitionActive = false;
+                this.isListening = false;
+            } finally {
+                this._startingRecognition = false;
+            }
+        }
+    }
+    
+    stopSpeaking() {
+        // Stop TTS immediately when user interrupts
+        if (this.ttsService) {
+            this.ttsService.stop();
+        }
+        this.isSpeaking = false;
+        this.speechQueue = []; // Clear queue to prevent continuing
+        this.currentSpeakingPromise = null;
+        this.stopWaveform();
     }
 
     handleVoiceInput(transcript) {

@@ -10,6 +10,8 @@ class PhoneCall {
         this.isSpeaking = false;
         this.waitingForResponse = false;
         this.isHangingUp = false;
+        this.recognitionActive = false; // Track if recognition is actively listening
+        this.speechQueueTimeout = null; // Track pending speech queue timeouts
         this.selectedVoice = options.voice || null; // Voice name or null for default
         this.voiceGender = options.voiceGender || null; // 'male' or 'female' to filter
         this.voiceLang = options.voiceLang || 'en-US'; // Language preference
@@ -29,30 +31,65 @@ class PhoneCall {
         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
         if (SpeechRecognition) {
             this.recognition = new SpeechRecognition();
-            this.recognition.continuous = false;
-            this.recognition.interimResults = false;
+            this.recognition.continuous = true; // Enable continuous recognition for interruption
+            this.recognition.interimResults = true; // Enable interim results to detect speech start
             this.recognition.lang = this.voiceLang;
             
+            // Detect when user starts speaking (interim results)
             this.recognition.onresult = (event) => {
-                const transcript = event.results[0][0].transcript.toLowerCase().trim();
-                this.handleUserResponse(transcript);
+                // Check if we have interim results (user is speaking)
+                let hasInterimResult = false;
+                let finalTranscript = '';
+                
+                for (let i = event.resultIndex; i < event.results.length; i++) {
+                    const result = event.results[i];
+                    if (result.isFinal) {
+                        finalTranscript = result[0].transcript.toLowerCase().trim();
+                    } else {
+                        hasInterimResult = true;
+                        // User is speaking - stop TTS immediately
+                        if (this.isSpeaking) {
+                            this.stopSpeaking();
+                        }
+                    }
+                }
+                
+                // Only process final results when we're waiting for response
+                if (finalTranscript && this.waitingForResponse && !hasInterimResult) {
+                    this.handleUserResponse(finalTranscript);
+                }
+            };
+
+            // Detect when user starts speaking (before results)
+            this.recognition.onspeechstart = () => {
+                // User started speaking - stop TTS immediately
+                if (this.isSpeaking) {
+                    this.stopSpeaking();
+                }
             };
 
             this.recognition.onerror = (event) => {
                 console.error('Speech recognition error:', event.error);
+                // Don't stop on 'no-speech' errors during continuous recognition
+                if (event.error === 'no-speech') {
+                    return;
+                }
                 // If error, show manual buttons as fallback
                 this.showManualButtons();
             };
 
             this.recognition.onend = () => {
-                // Restart if still waiting for response
-                if (this.waitingForResponse) {
+                // Restart if still waiting for response and not speaking
+                if (this.waitingForResponse && !this.isSpeaking && !this.isHangingUp) {
                     try {
+                        this.recognitionActive = true;
                         this.recognition.start();
                     } catch (e) {
                         // Recognition already started or error
                         this.showManualButtons();
                     }
+                } else {
+                    this.recognitionActive = false;
                 }
             };
         } else {
@@ -79,11 +116,15 @@ class PhoneCall {
         // Set up callbacks
         this.ttsService.setOnEnd(() => {
             this.isSpeaking = false;
+            // Resume speech recognition after TTS stops
+            this.resumeRecognitionIfNeeded();
         });
         
         this.ttsService.setOnError((error) => {
             console.error('TTS error:', error);
             this.isSpeaking = false;
+            // Resume speech recognition after TTS stops
+            this.resumeRecognitionIfNeeded();
         });
     }
 
@@ -319,6 +360,8 @@ class PhoneCall {
     }
 
     speakMessages(messages) {
+        // Stop any ongoing speech before starting new messages
+        this.stopSpeaking();
         this.speechQueue = [...messages];
         this.processSpeechQueue();
     }
@@ -340,15 +383,10 @@ class PhoneCall {
             }
         }
         
-        // Start speech recognition
-        if (this.recognition && !this.waitingForResponse) {
+        // Start speech recognition (only if not already active and not speaking)
+        if (this.recognition && !this.waitingForResponse && !this.isSpeaking) {
             this.waitingForResponse = true;
-            try {
-                this.recognition.start();
-            } catch (e) {
-                console.warn('Could not start speech recognition:', e);
-                this.showManualButtons();
-            }
+            this.startRecognition();
         } else if (!this.recognition) {
             // Fallback to manual buttons if no speech recognition
             this.showManualButtons();
@@ -380,12 +418,72 @@ class PhoneCall {
             responsePrompt.style.display = 'none';
         }
         this.waitingForResponse = false;
-        if (this.recognition) {
+        this.stopRecognition();
+    }
+    
+    startRecognition() {
+        if (this.recognition && !this.recognitionActive && !this.isSpeaking) {
+            try {
+                this.recognitionActive = true;
+                this.recognition.start();
+            } catch (e) {
+                console.warn('Could not start speech recognition:', e);
+                this.recognitionActive = false;
+                this.showManualButtons();
+            }
+        }
+    }
+    
+    stopRecognition() {
+        if (this.recognition && this.recognitionActive) {
             try {
                 this.recognition.stop();
+                this.recognitionActive = false;
+            } catch (e) {
+                // Already stopped
+                this.recognitionActive = false;
+            }
+        }
+    }
+    
+    pauseRecognition() {
+        // Pause recognition while TTS is speaking to avoid picking up chatbot's voice
+        if (this.recognition && this.recognitionActive) {
+            try {
+                this.recognition.stop();
+                this.recognitionActive = false;
             } catch (e) {
                 // Already stopped
             }
+        }
+    }
+    
+    resumeRecognitionIfNeeded() {
+        // Resume recognition after TTS stops, if we're waiting for response
+        if (this.waitingForResponse && !this.isSpeaking && !this.isHangingUp) {
+            // Small delay to ensure TTS audio has fully stopped
+            setTimeout(() => {
+                if (!this.isSpeaking && this.waitingForResponse) {
+                    this.startRecognition();
+                }
+            }, 300);
+        }
+    }
+    
+    stopSpeaking() {
+        // Stop TTS immediately when user interrupts
+        if (this.ttsService) {
+            this.ttsService.stop();
+        }
+        this.isSpeaking = false;
+        this.speechQueue = []; // Clear queue to prevent continuing
+        this.stopWaveform();
+        
+        // Cancel any pending speech queue processing
+        // This prevents multiple voices from starting
+        if (this.speechQueueTimeout) {
+            clearTimeout(this.speechQueueTimeout);
+            this.speechQueueTimeout = null;
         }
     }
 
@@ -455,6 +553,12 @@ class PhoneCall {
     }
 
     processSpeechQueue() {
+        // Clear any pending timeout
+        if (this.speechQueueTimeout) {
+            clearTimeout(this.speechQueueTimeout);
+            this.speechQueueTimeout = null;
+        }
+        
         if (this.speechQueue.length === 0) {
             this.isSpeaking = false;
             this.stopWaveform();
@@ -487,12 +591,15 @@ class PhoneCall {
         if (!this.ttsService) {
             // Fallback: just show text if TTS not available
             this.updateCaption(text);
-            setTimeout(() => this.processSpeechQueue(), 2000);
+            this.speechQueueTimeout = setTimeout(() => this.processSpeechQueue(), 2000);
             return;
         }
 
         // Stop any ongoing speech
         this.ttsService.stop();
+        
+        // Pause speech recognition while speaking to avoid picking up chatbot's voice
+        this.pauseRecognition();
 
         this.isSpeaking = true;
         this.startWaveform();
@@ -508,13 +615,16 @@ class PhoneCall {
             
             this.isSpeaking = false;
             this.stopWaveform();
+            // Resume recognition if needed (handled by TTS onEnd callback)
             // Small delay before next message
-            setTimeout(() => this.processSpeechQueue(), 500);
+            this.speechQueueTimeout = setTimeout(() => this.processSpeechQueue(), 500);
         } catch (error) {
             console.error('Error speaking:', error);
             this.isSpeaking = false;
             this.stopWaveform();
-            setTimeout(() => this.processSpeechQueue(), 500);
+            // Resume recognition if needed
+            this.resumeRecognitionIfNeeded();
+            this.speechQueueTimeout = setTimeout(() => this.processSpeechQueue(), 500);
         }
     }
 
@@ -564,25 +674,21 @@ class PhoneCall {
     }
 
     handleHangUpAttempt() {
-        // If already in hang up flow, actually end the call
+        // If already in hang up flow, actually end the call immediately
         if (this.isHangingUp) {
             this.endCall();
             return;
         }
 
-        // Stop any ongoing speech
-        if (this.ttsService) {
-            this.ttsService.stop();
-        }
+        // Completely stop all speech and clear everything before starting new pitch
+        this.stopSpeaking();
         
         // Stop speech recognition
-        if (this.recognition) {
-            try {
-                this.recognition.stop();
-            } catch (e) {
-                // Already stopped
-            }
-        }
+        this.stopRecognition();
+
+        // Ensure speech queue is completely cleared
+        this.speechQueue = [];
+        this.isSpeaking = false;
 
         this.isHangingUp = true;
         this.waitingForResponse = false;
@@ -594,9 +700,15 @@ class PhoneCall {
             installBtn.style.display = 'none';
         }
 
-        // Play warning pitch
-        const hangUpPitch = this.getHangUpPitch();
-        this.speakMessages(hangUpPitch);
+        // Small delay to ensure all audio has stopped before starting new pitch
+        setTimeout(() => {
+            // Double-check we're still in hang up flow and not speaking
+            if (this.isHangingUp && !this.isSpeaking) {
+                // Play warning pitch
+                const hangUpPitch = this.getHangUpPitch();
+                this.speakMessages(hangUpPitch);
+            }
+        }, 100);
     }
 
     getHangUpPitch() {
@@ -612,23 +724,16 @@ class PhoneCall {
 
     endCall() {
         // Stop any ongoing speech
-        if (this.ttsService) {
-            this.ttsService.stop();
-        }
+        this.stopSpeaking();
         
         // Stop speech recognition
-        if (this.recognition) {
-            try {
-                this.recognition.stop();
-            } catch (e) {
-                // Already stopped
-            }
-        }
+        this.stopRecognition();
         
         this.isSpeaking = false;
         this.speechQueue = [];
         this.waitingForResponse = false;
         this.isHangingUp = false;
+        this.recognitionActive = false;
         this.stopWaveform();
         this.hide();
     }
