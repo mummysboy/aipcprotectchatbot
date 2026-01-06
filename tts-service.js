@@ -401,16 +401,6 @@ class TTSService {
                                 return;
                             }
                             console.log('✓ Audio play() promise resolved - audio should be playing');
-                            console.log('Final audio state - volume:', audio.volume, 'muted:', audio.muted, 'paused:', audio.paused);
-
-                            // Additional check: ensure audio is actually playing audibly
-                            setTimeout(() => {
-                                if (!audio.paused && !audio.muted && audio.volume > 0) {
-                                    console.log('✓ Audio confirmed playing with sound');
-                                } else {
-                                    console.warn('⚠ Audio may not be playing audibly - paused:', audio.paused, 'muted:', audio.muted, 'volume:', audio.volume);
-                                }
-                            }, 100);
                         }).catch(error => {
                             console.error('✗ Failed to play audio:', error);
                             console.error('Play error details:', {
@@ -513,13 +503,6 @@ class TTSService {
 
                 audio.onplay = () => {
                     console.log('✓ Audio started playing');
-                    console.log('Audio volume:', audio.volume, 'muted:', audio.muted);
-                    // Ensure volume is set correctly
-                    if (audio.volume === 0 || audio.muted) {
-                        console.warn('Audio volume is 0 or muted, fixing...');
-                        audio.volume = options.volume !== undefined ? options.volume : 1;
-                        audio.muted = false;
-                    }
                 };
 
                 audio.onpause = () => {

@@ -575,9 +575,8 @@ class ChatbotPopup {
                 this.toggleMute();
             });
             console.log('Mute button event listener attached');
-        } else {
-            console.warn('Mute button not found when setting up listeners');
         }
+        // Note: Mute button not found in popup interface - it's added when call starts
     }
 
     show() {
@@ -1647,7 +1646,7 @@ class ChatbotPopup {
         if (!this.vadEnabled || this.micStream) {
             return; // Already running or disabled
         }
-
+        
         try {
             // Request microphone with AEC enabled
             this.micStream = await navigator.mediaDevices.getUserMedia({
@@ -1657,22 +1656,15 @@ class ChatbotPopup {
                     autoGainControl: true
                 }
             });
-
+            
             // Create Web Audio API context and analyser
             this.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-
-            // Resume AudioContext if it's suspended (required in some browsers)
-            if (this.audioCtx.state === 'suspended') {
-                await this.audioCtx.resume();
-                console.log('AudioContext resumed for VAD');
-            }
-
             const source = this.audioCtx.createMediaStreamSource(this.micStream);
             this.analyser = this.audioCtx.createAnalyser();
             this.analyser.fftSize = 2048;
             this.analyser.smoothingTimeConstant = 0.8;
             source.connect(this.analyser);
-
+            
             // Start VAD loop
             this._vadLoop();
             console.log('VAD mic monitor started');
