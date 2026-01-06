@@ -34,6 +34,24 @@ class ChatbotPopup {
         this.batchSize = 3; // Number of messages to batch together
         this.currentCaptions = []; // Track current batch captions for display
         this.ttsStartTime = null; // Track when TTS started to filter out early false positives
+        this._bargeInDetected = false; // Track if barge-in was just triggered (for extended recognition wait)
+        
+        // VAD (Voice Activity Detection) for barge-in during TTS
+        // Note: SpeechRecognition cannot use getUserMedia AEC constraints, so we use a separate
+        // mic monitor with AEC to detect user speech during TTS, then start SpeechRecognition
+        // only after stopping TTS to prevent self-hearing/false triggers.
+        this.micStream = null; // getUserMedia stream for VAD
+        this.audioCtx = null; // Web Audio API context
+        this.analyser = null; // AnalyserNode for audio analysis
+        this.vadRAF = null; // requestAnimationFrame ID for VAD loop
+        this.vadEnabled = true; // Enable/disable VAD
+        this.vadThreshold = 0.02; // RMS threshold for speech detection (tune: 0.01-0.05)
+        this.vadHoldMs = 160; // Duration above threshold to trigger (ms)
+        this.vadCooldownMs = 700; // Cooldown after trigger before next detection (ms)
+        this._vadAboveSince = null; // Timestamp when RMS first exceeded threshold
+        this._vadLastTrigger = 0; // Timestamp of last barge-in trigger
+        this._bargeInInterimTimeout = null; // Timeout for processing interim results during barge-in
+        this._lastInterimTranscript = ''; // Store latest interim transcript for barge-in timeout
     }
 
     init() {
@@ -96,42 +114,87 @@ class ChatbotPopup {
             this.recognition.lang = this.voiceLang;
             
             // Detect when user speaks
+            // Note: SpeechRecognition is OFF during TTS to prevent self-hearing.
+            // VAD mic monitor handles barge-in detection, then starts SpeechRecognition immediately.
             this.recognition.onresult = (event) => {
-                // Check if we have interim results (user is speaking)
-                let hasInterimResult = false;
+                // Collect both final and interim transcripts
+                // Use interim if final is empty (helps capture speech during barge-in)
                 let finalTranscript = '';
+                let interimTranscript = '';
                 
                 for (let i = event.resultIndex; i < event.results.length; i++) {
                     const result = event.results[i];
+                    const transcript = result[0].transcript.trim();
                     if (result.isFinal) {
-                        finalTranscript = result[0].transcript.trim();
+                        finalTranscript = transcript;
                     } else {
-                        hasInterimResult = true;
-                        // User is speaking - check if we should interrupt
-                        if (this.isSpeaking) {
-                            // With AEC enabled, we still need a longer delay to let AEC fully adapt
-                            // AEC needs time to learn and filter out the TTS echo
-                            // Interim results are more reliable than onspeechstart for detecting real user speech
-                            const timeSinceTtsStart = this.ttsStartTime ? Date.now() - this.ttsStartTime : Infinity;
-                            // Increased to 3 seconds to give AEC more time to adapt and filter echo
-                            // Interim results give us more confidence it's real speech, not just echo
-                            if (timeSinceTtsStart > 3000) {
-                                console.log('User interruption detected during TTS (barge-in with AEC)');
-                                this.stopSpeaking();
-                            } else {
-                                console.log(`Ignoring speech detection (${timeSinceTtsStart}ms since TTS start - AEC adaptation period)`);
-                            }
-                        }
+                        // Keep track of latest interim result
+                        interimTranscript = transcript;
+                        // Store for barge-in timeout processing
+                        this._lastInterimTranscript = transcript;
                     }
                 }
                 
-                // Only process final results if chatbot is not speaking
-                // (or if we just interrupted, which sets isSpeaking to false)
-                if (finalTranscript && !hasInterimResult && !this.isSpeaking) {
+                // Use final transcript if available, otherwise use interim (for barge-in cases)
+                const transcriptToUse = finalTranscript || interimTranscript;
+                
+                // Log all recognition results for debugging
+                if (transcriptToUse) {
+                    console.log('Recognition result:', {
+                        final: finalTranscript,
+                        interim: interimTranscript,
+                        used: transcriptToUse,
+                        isSpeaking: this.isSpeaking,
+                        bargeIn: this._bargeInDetected,
+                        waitingForResponse: this.waitingForResponse
+                    });
+                }
+                
+                // Process results if:
+                // 1. We have a transcript AND
+                // 2. Either chatbot is not speaking, OR barge-in was just detected (allow processing during barge-in)
+                if (transcriptToUse && (!this.isSpeaking || this._bargeInDetected)) {
+                    // If we only have interim and not during barge-in, wait for final
+                    if (!finalTranscript && interimTranscript && !this._bargeInDetected) {
+                        // Don't process interim immediately - wait for final (unless barge-in)
+                        return;
+                    }
+                    
+                    // During barge-in, process final results immediately, or interim if no final yet
+                    if (this._bargeInDetected) {
+                        // During barge-in, prefer final but accept interim if that's all we have
+                        if (finalTranscript) {
+                            // We have final - process it
+                            console.log('Processing final transcript during barge-in:', finalTranscript);
+                        } else if (interimTranscript) {
+                            // Only interim - wait a bit more for final (but not too long)
+                            console.log('Waiting for final transcript during barge-in, interim:', interimTranscript);
+                            // Set a timeout to process interim if final doesn't come
+                            if (!this._bargeInInterimTimeout) {
+                                const interimToProcess = interimTranscript; // Capture current value
+                                this._bargeInInterimTimeout = setTimeout(() => {
+                                    // Use the stored latest interim transcript
+                                    const transcriptToProcess = this._lastInterimTranscript || interimToProcess;
+                                    if (transcriptToProcess && this._bargeInDetected) {
+                                        console.log('Processing interim transcript after timeout:', transcriptToProcess);
+                                        this._bargeInInterimTimeout = null;
+                                        if (this.waitingForResponse) {
+                                            this.handleUserResponse(transcriptToProcess);
+                                        } else {
+                                            this.handleVoiceInput(transcriptToProcess);
+                                        }
+                                    }
+                                }, 1500); // Wait 1.5s for final, then use interim
+                            }
+                            return;
+                        }
+                    }
+                    
+                    // Process the transcript
                     if (this.waitingForResponse) {
-                        this.handleUserResponse(finalTranscript);
+                        this.handleUserResponse(transcriptToUse);
                     } else {
-                        this.handleVoiceInput(finalTranscript);
+                        this.handleVoiceInput(transcriptToUse);
                     }
                 }
             };
@@ -532,6 +595,9 @@ class ChatbotPopup {
     }
 
     hide() {
+        // Stop VAD mic monitor when popup is hidden
+        this.stopMicMonitor();
+        
         if (this.popup) {
             this.popup.classList.remove('active');
             document.body.style.overflow = '';
@@ -802,18 +868,25 @@ class ChatbotPopup {
         // Normalize input
         const response = typeof transcript === 'string' ? transcript.toLowerCase().trim() : transcript;
         
+        console.log('handleUserResponse called with:', response);
+        
         this.hideResponsePrompt();
         
-        // Check for yes/no variations
+        // Check for yes/no variations (including common alternatives)
         const isYes = response.includes('yes') || response.includes('yeah') || 
                      response.includes('sure') || response.includes('okay') ||
                      response.includes('ok') || response.includes('yep') ||
-                     response.includes('stay') || response.includes('continue');
+                     response.includes('stay') || response.includes('continue') ||
+                     response.includes('yea') || response.includes('yup') ||
+                     response.includes('alright') || response.includes('all right') ||
+                     response.includes('correct') || response.includes('right') ||
+                     response.includes('affirmative') || response.includes('absolutely');
         
         const isNo = response.includes('no') || response.includes('nope') || 
                     response.includes('not') || response.includes('nah') ||
                     response.includes('hang up') || response.includes('end call') ||
-                    response.includes('disconnect');
+                    response.includes('disconnect') || response.includes('stop') ||
+                    response.includes('cancel') || response.includes('decline');
 
         // If in hang up flow
         if (this.isHangingUp) {
@@ -839,15 +912,35 @@ class ChatbotPopup {
 
         // Normal flow (not hanging up)
         if (isYes) {
+            this._bargeInDetected = false; // Clear flag on successful recognition
             this.showInstallButton();
         } else if (isNo) {
+            this._bargeInDetected = false; // Clear flag on successful recognition
             this.continueWithSalesPitch();
         } else {
-            // Unclear response, ask again
-            this.updateCaption("I didn't catch that. Please say Yes or No.");
-            setTimeout(() => {
-                this.showResponsePrompt();
-            }, 2000);
+            // Not yes/no - treat as regular voice input and respond to what they said
+            if (!response || response.length < 2) {
+                // Empty or very short - might still be processing (especially after barge-in)
+                console.log('Empty or very short transcript, waiting for recognition to complete...');
+                // If barge-in was just detected, wait longer for recognition
+                const waitTime = this._bargeInDetected ? 4000 : 2000;
+                setTimeout(() => {
+                    // If still waiting for response, show prompt again
+                    if (this.waitingForResponse) {
+                        this.showResponsePrompt();
+                    }
+                }, waitTime);
+            } else {
+                // Has content but doesn't match yes/no - treat as regular message
+                console.log('Non-yes/no response, treating as regular input:', response);
+                this._bargeInDetected = false; // Clear flag
+                
+                // Clear waitingForResponse flag since we're handling it as a regular message
+                this.waitingForResponse = false;
+                
+                // Process as regular voice input (send to ChatGPT)
+                this.handleVoiceInput(transcript); // Use original transcript, not normalized response
+            }
         }
     }
 
@@ -887,6 +980,9 @@ class ChatbotPopup {
                 // Already stopped
             }
         }
+        
+        // Stop VAD mic monitor
+        this.stopMicMonitor();
 
         // Clear the speech queue to stop any pending messages
         this.speechQueue = [];
@@ -941,6 +1037,9 @@ class ChatbotPopup {
                 // Already stopped
             }
         }
+        
+        // Stop VAD mic monitor
+        this.stopMicMonitor();
         
         this.isSpeaking = false;
         this.speechQueue = [];
@@ -1189,18 +1288,18 @@ class ChatbotPopup {
             return;
         }
 
-        // Keep recognition active for barge-in (interruption) with AEC enabled
-        // AEC (Acoustic Echo Cancellation) should filter out the chatbot's voice
-        // Track when TTS starts for additional safety filtering
+        // Track when TTS starts for VAD filtering (ignore first 250ms)
         this.ttsStartTime = Date.now();
         
-        // Ensure recognition is active for interruption detection
-        // With AEC, we can keep it running during TTS
-        if (!this.recognitionActive && !this._startingRecognition && !this.isMuted && this.recognition) {
-            this.startRecognition().catch(err => {
-                console.warn('Failed to start recognition for interruption:', err);
-            });
-        }
+        // Pause SpeechRecognition during TTS to prevent self-hearing/false triggers
+        // SpeechRecognition cannot use getUserMedia AEC constraints, so we use a separate
+        // VAD mic monitor with AEC instead to detect user speech during TTS
+        this.pauseRecognition();
+        
+        // Start VAD mic monitor for barge-in detection (non-fatal if it fails)
+        this.startMicMonitor().catch(err => {
+            console.warn('Failed to start mic monitor (non-fatal):', err);
+        });
 
         // Stop any ongoing speech and clear previous promise
         // This prevents old promises from resolving and processing the queue again
@@ -1237,7 +1336,11 @@ class ChatbotPopup {
                 this.isSpeaking = false;
                 this.currentSpeakingPromise = null;
                 this.stopWaveform();
-                // Resume recognition after TTS stops
+                // Stop VAD mic monitor (no longer needed)
+                this.stopMicMonitor();
+                // Restore TTS volume in case it was ducked
+                this.restoreTTSVolume();
+                // Resume recognition after TTS stops (only if needed)
                 this.resumeRecognitionIfNeeded();
                 // Process immediately for smooth transitions
                 this.processSpeechQueue();
@@ -1252,6 +1355,10 @@ class ChatbotPopup {
                 this.isSpeaking = false;
                 this.currentSpeakingPromise = null;
                 this.stopWaveform();
+                // Stop VAD mic monitor
+                this.stopMicMonitor();
+                // Restore TTS volume
+                this.restoreTTSVolume();
                 // Resume recognition after TTS stops
                 this.resumeRecognitionIfNeeded();
                 // Minimal delay for error recovery
@@ -1439,8 +1546,8 @@ class ChatbotPopup {
     }
     
     resumeRecognitionIfNeeded() {
-        // Recognition should already be active (we keep it active during TTS for interruption)
-        // This method is mainly for edge cases where recognition stopped unexpectedly
+        // Resume recognition after TTS stops (only if needed, e.g., waitingForResponse)
+        // Note: Recognition is paused during TTS to prevent self-hearing; VAD handles barge-in
         if (!this.isSpeaking && !this.isHangingUp && !this.isMuted && this.recognition) {
             // Small delay to ensure TTS audio has fully stopped
             setTimeout(() => {
@@ -1527,6 +1634,180 @@ class ChatbotPopup {
         this.speechQueue = []; // Clear queue to prevent continuing
         this.currentSpeakingPromise = null;
         this.stopWaveform();
+        // Stop VAD mic monitor (no longer needed)
+        this.stopMicMonitor();
+        // Restore TTS volume in case it was ducked
+        this.restoreTTSVolume();
+    }
+    
+    // VAD (Voice Activity Detection) helper methods for barge-in
+    
+    async startMicMonitor() {
+        // Start microphone monitoring with AEC for barge-in detection during TTS
+        if (!this.vadEnabled || this.micStream) {
+            return; // Already running or disabled
+        }
+
+        try {
+            // Request microphone with AEC enabled
+            this.micStream = await navigator.mediaDevices.getUserMedia({
+                audio: {
+                    echoCancellation: true,
+                    noiseSuppression: true,
+                    autoGainControl: true
+                }
+            });
+
+            // Create Web Audio API context and analyser
+            this.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+            // Resume AudioContext if it's suspended (required in some browsers)
+            if (this.audioCtx.state === 'suspended') {
+                await this.audioCtx.resume();
+                console.log('AudioContext resumed for VAD');
+            }
+
+            const source = this.audioCtx.createMediaStreamSource(this.micStream);
+            this.analyser = this.audioCtx.createAnalyser();
+            this.analyser.fftSize = 2048;
+            this.analyser.smoothingTimeConstant = 0.8;
+            source.connect(this.analyser);
+
+            // Start VAD loop
+            this._vadLoop();
+            console.log('VAD mic monitor started');
+        } catch (error) {
+            console.warn('Failed to start mic monitor (non-fatal):', error);
+            // Non-fatal - barge-in just won't work
+            this.stopMicMonitor();
+        }
+    }
+    
+    stopMicMonitor() {
+        // Stop microphone monitoring
+        if (this.vadRAF !== null) {
+            cancelAnimationFrame(this.vadRAF);
+            this.vadRAF = null;
+        }
+        
+        if (this.micStream) {
+            this.micStream.getTracks().forEach(track => track.stop());
+            this.micStream = null;
+        }
+        
+        if (this.audioCtx) {
+            this.audioCtx.close().catch(() => {});
+            this.audioCtx = null;
+        }
+        
+        this.analyser = null;
+        this._vadAboveSince = null;
+    }
+    
+    _vadLoop() {
+        // VAD detection loop using requestAnimationFrame
+        if (!this.analyser || !this.isSpeaking) {
+            // Only run when speaking and analyser exists
+            if (this.isSpeaking) {
+                // Still speaking but analyser lost, restart
+                this.stopMicMonitor();
+                this.startMicMonitor().catch(() => {});
+            }
+            return;
+        }
+        
+        // Get time-domain samples
+        const bufferLength = this.analyser.fftSize;
+        const dataArray = new Uint8Array(bufferLength);
+        this.analyser.getByteTimeDomainData(dataArray);
+        
+        // Compute RMS (Root Mean Square) for energy detection
+        let sum = 0;
+        for (let i = 0; i < bufferLength; i++) {
+            const normalized = (dataArray[i] - 128) / 128; // Normalize to -1..1
+            sum += normalized * normalized;
+        }
+        const rms = Math.sqrt(sum / bufferLength);
+        
+        // Ignore first 250ms of TTS to avoid false positives
+        const timeSinceTtsStart = this.ttsStartTime ? Date.now() - this.ttsStartTime : Infinity;
+        if (timeSinceTtsStart < 250) {
+            this._vadAboveSince = null;
+            this.vadRAF = requestAnimationFrame(() => this._vadLoop());
+            return;
+        }
+        
+        // Check cooldown period
+        const timeSinceLastTrigger = Date.now() - this._vadLastTrigger;
+        if (timeSinceLastTrigger < this.vadCooldownMs) {
+            this._vadAboveSince = null;
+            this.vadRAF = requestAnimationFrame(() => this._vadLoop());
+            return;
+        }
+        
+        // Check if RMS exceeds threshold
+        if (rms > this.vadThreshold) {
+            if (this._vadAboveSince === null) {
+                this._vadAboveSince = Date.now();
+            }
+            
+            // Check if we've been above threshold for hold duration
+            const durationAbove = Date.now() - this._vadAboveSince;
+            if (durationAbove >= this.vadHoldMs) {
+                // Trigger barge-in
+                console.log('VAD detected user speech - triggering barge-in');
+                this._vadLastTrigger = Date.now();
+                this._vadAboveSince = null;
+                this._bargeInDetected = true; // Flag that barge-in just happened
+                
+                // Duck TTS volume immediately
+                this.duckTTS(0.15);
+                
+                // Start recognition IMMEDIATELY to capture user speech (don't wait for TTS to stop)
+                // This ensures we capture the speech that triggered the barge-in
+                if (!this.isMuted && !this.recognitionActive && !this._startingRecognition && this.recognition) {
+                    this.startRecognition().catch(err => {
+                        console.warn('Failed to start recognition after barge-in:', err);
+                    });
+                }
+                
+                // After 80ms, stop TTS (recognition is already running)
+                setTimeout(() => {
+                    if (this.isSpeaking) {
+                        this.stopSpeaking();
+                    }
+                    // Clear barge-in flag after a delay to allow recognition to process
+                    setTimeout(() => {
+                        this._bargeInDetected = false;
+                        // Clear any pending interim timeout
+                        if (this._bargeInInterimTimeout) {
+                            clearTimeout(this._bargeInInterimTimeout);
+                            this._bargeInInterimTimeout = null;
+                        }
+                    }, 5000); // Give recognition 5 seconds to capture speech
+                }, 80);
+            }
+        } else {
+            // Reset threshold tracking if below threshold
+            this._vadAboveSince = null;
+        }
+        
+        // Continue loop
+        this.vadRAF = requestAnimationFrame(() => this._vadLoop());
+    }
+    
+    duckTTS(volume) {
+        // Duck TTS volume (0.0 to 1.0)
+        if (this.ttsService?.currentAudio) {
+            this.ttsService.currentAudio.volume = Math.max(0, Math.min(1, volume));
+        }
+    }
+    
+    restoreTTSVolume() {
+        // Restore TTS volume to full
+        if (this.ttsService?.currentAudio) {
+            this.ttsService.currentAudio.volume = 1;
+        }
     }
 
     handleVoiceInput(transcript) {
