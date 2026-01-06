@@ -3,8 +3,9 @@
 
 class ChatGPTService {
     constructor() {
-        // Use local server endpoint instead of OpenAI directly
-        this.apiUrl = '/api/chat';
+        // Use API config for base URL (supports both local and hosted environments)
+        const apiBaseUrl = window.API_CONFIG ? window.API_CONFIG.getApiUrl('/api/chat') : '/api/chat';
+        this.apiUrl = apiBaseUrl;
         this.conversationHistory = [];
     }
 

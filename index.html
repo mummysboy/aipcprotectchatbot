@@ -34,6 +34,11 @@
             });
         }
     </script>
+    <script>
+        // No need to set API_BASE_URL - Netlify Functions are on the same domain
+        // The netlify.toml redirects /api/* routes to Netlify Functions automatically
+    </script>
+    <script src="api-config.js"></script>
     <script src="chatgpt-service.js"></script>
     <script src="tts-service.js"></script>
     <script src="chatbot-popup.js"></script>

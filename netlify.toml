@@ -1,0 +1,33 @@
+[build]
+  # Directory to publish (Netlify will serve files from here)
+  publish = "."
+  
+  # Functions directory
+  functions = "netlify/functions"
+
+# Redirect API routes to Netlify Functions
+[[redirects]]
+  from = "/api/chat"
+  to = "/.netlify/functions/api-chat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/tts"
+  to = "/.netlify/functions/api-tts"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/tts/voices"
+  to = "/.netlify/functions/api-tts-voices"
+  status = 200
+  force = true
+
+# Test endpoint redirect
+[[redirects]]
+  from = "/api/test"
+  to = "/.netlify/functions/api-test"
+  status = 200
+  force = true
+

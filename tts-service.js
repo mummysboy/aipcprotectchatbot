@@ -94,7 +94,10 @@ class TTSService {
             const voiceId = options.voiceId || this.voiceId;
             const modelId = options.modelId || this.modelId;
 
-            const response = await fetch('/api/tts', {
+            // Use API config for base URL (supports both local and hosted environments)
+            const apiUrl = window.API_CONFIG ? window.API_CONFIG.getApiUrl('/api/tts') : '/api/tts';
+            
+            const response = await fetch(apiUrl, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
@@ -203,7 +206,10 @@ class TTSService {
             console.log('Calling ElevenLabs TTS API with voice:', voiceId);
 
             // Call server endpoint to generate speech
-            const response = await fetch('/api/tts', {
+            // Use API config for base URL (supports both local and hosted environments)
+            const apiUrl = window.API_CONFIG ? window.API_CONFIG.getApiUrl('/api/tts') : '/api/tts';
+            
+            const response = await fetch(apiUrl, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
@@ -458,7 +464,10 @@ class TTSService {
         }
 
         try {
-            const response = await fetch('/api/tts/voices', {
+            // Use API config for base URL (supports both local and hosted environments)
+            const apiUrl = window.API_CONFIG ? window.API_CONFIG.getApiUrl('/api/tts/voices') : '/api/tts/voices';
+            
+            const response = await fetch(apiUrl, {
                 method: 'GET',
                 headers: {
                     'Content-Type': 'application/json'

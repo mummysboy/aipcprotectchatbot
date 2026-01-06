@@ -90,10 +90,55 @@ const voiceOptions = {
 - **ElevenLabs free tier** includes 10,000 characters/month
 - The app automatically falls back to browser TTS if ElevenLabs fails
 
+## Hosting Configuration
+
+When hosting this application, you need to configure the API base URL so the frontend can communicate with your backend server.
+
+### Option 1: Same Domain Hosting (Recommended)
+
+If your frontend and backend are served from the same domain (e.g., both on `https://yourdomain.com`), no configuration is needed. The app will automatically use relative URLs.
+
+### Option 2: Cross-Origin Hosting
+
+If your frontend and backend are on different domains, you need to set the API base URL:
+
+**Method A: Set in HTML (before scripts load)**
+```html
+<script>
+    window.API_BASE_URL = 'https://your-backend-domain.com';
+</script>
+<script src="api-config.js"></script>
+<!-- other scripts -->
+```
+
+**Method B: Use data attribute**
+```html
+<html data-api-base-url="https://your-backend-domain.com">
+```
+
+**Method C: Set dynamically in JavaScript**
+```javascript
+if (window.API_CONFIG) {
+    window.API_CONFIG.setBaseUrl('https://your-backend-domain.com');
+}
+```
+
+### Hosting Platforms
+
+**For platforms like Vercel, Netlify, or Railway:**
+1. Deploy your `server.js` as a serverless function or Node.js app
+2. Set the API base URL to your backend URL
+3. Make sure environment variables (`OPENAI_API_KEY`, `ELEVENLABS_API_KEY`) are set in your hosting platform
+
+**Example for Vercel:**
+- Deploy server.js as a serverless function
+- Set `window.API_BASE_URL = 'https://your-app.vercel.app'` in your HTML
+
 ## Notes
 
 - The API key is stored in `.env` and never exposed to the client
 - Make sure to add `.env` to `.gitignore` (already included)
 - The server proxies all API requests to OpenAI to keep your key secure
 - Voice features work best in Chrome, Edge, or Safari browsers
+- When hosted, ensure CORS is properly configured on your backend (already handled in `server.js`)
 
