@@ -27,6 +27,7 @@ class TTSService {
         this.pendingAudio = []; // Track all audio instances for cleanup
         this.isStopping = false; // Flag to prevent new audio during stop
         this.speakPromise = null; // Track current speak operation to prevent overlapping calls
+        this.currentRejectCallback = null; // Track reject callback for current promise
     }
 
     init() {
@@ -205,7 +206,7 @@ class TTSService {
                 const audioUrl = this.preloadedAudio.url;
                 this.preloadedAudio = null; // Clear preloaded audio
                 
-            // Stop any current audio (already done in speak())
+                // Stop any current audio (already done in speak())
                 
                 // Play the preloaded audio
                 this.currentAudio = audio;
@@ -213,18 +214,17 @@ class TTSService {
                 this.isPlaying = true;
                 audio.volume = options.volume !== undefined ? options.volume : 1;
                 
-                return new Promise((resolve, reject) => {
-                    const tryPlay = () => {
-                        if (audio.readyState >= 2) {
-                            audio.play().then(() => {
-                                console.log('✓ Playing preloaded audio');
-                            }).catch(reject);
-                        } else {
-                            setTimeout(tryPlay, 10);
-                        }
+                return new Promise(async (resolve, reject) => {
+                    // Store reject callback so stop() can reject this promise
+                    this.currentRejectCallback = reject;
+                    
+                    // Add debug event listeners
+                    audio.onplay = () => {
+                        console.log('🔊 Preloaded audio onplay fired - audio is actually playing');
                     };
                     
                     audio.onended = () => {
+                        console.log('✅ Preloaded audio onended fired - playback completed');
                         if (this.currentAudio === audio) {
                             this.isPlaying = false;
                             if (this.currentAudioUrl) {
@@ -233,6 +233,7 @@ class TTSService {
                             }
                             const callback = this.onEndCallback;
                             this.currentAudio = null;
+                            this.currentRejectCallback = null;
                             if (callback) callback();
                             resolve();
                         } else {
@@ -240,7 +241,39 @@ class TTSService {
                         }
                     };
                     
-                    audio.onerror = reject;
+                    audio.onerror = (error) => {
+                        console.log('❌ Preloaded audio onerror fired:', error);
+                        this.isPlaying = false;
+                        if (this.currentAudio === audio) {
+                            if (this.currentAudioUrl) {
+                                URL.revokeObjectURL(this.currentAudioUrl);
+                                this.currentAudioUrl = null;
+                            }
+                            this.currentAudio = null;
+                            this.currentRejectCallback = null;
+                        }
+                        URL.revokeObjectURL(audioUrl);
+                        reject(new Error(`Preloaded audio element error: ${audio.error?.message || 'Unknown error'}`));
+                    };
+                    
+                    const tryPlay = async () => {
+                        if (audio.readyState >= 2) {
+                            try {
+                                await audio.play();
+                                console.log('✓ Playing preloaded audio');
+                            } catch (playError) {
+                                console.error('✗ Failed to play preloaded audio:', playError);
+                                if (playError.name === 'NotAllowedError') {
+                                    reject(new Error(`Audio play() failed (autoplay blocked?): ${playError.message || playError}`));
+                                } else {
+                                    reject(new Error(`Audio play() failed: ${playError.message || playError}`));
+                                }
+                            }
+                        } else {
+                            setTimeout(tryPlay, 10);
+                        }
+                    };
+                    
                     tryPlay();
                 });
             }
@@ -302,24 +335,43 @@ class TTSService {
             console.log('Response content-type:', response.headers.get('content-type'));
             console.log('Response status:', response.status);
 
-            // Get audio blob
-            const audioBlob = await response.blob();
-            console.log('Audio blob received, size:', audioBlob.size, 'bytes');
+            // CRITICAL: Check response content type
+            const contentType = response.headers.get('content-type') || '';
+            console.log('Response content-type:', contentType);
             
-            if (audioBlob.size === 0) {
-                console.error('Empty audio blob received');
-                return this.speakWithBrowser(text, options);
+            // Check if response is actually audio (not JSON error)
+            if (!contentType.includes('audio') && !contentType.includes('mpeg') && !contentType.includes('wav')) {
+                const errorText = await response.text();
+                console.error('Response is not audio, got:', errorText.substring(0, 200));
+                throw new Error(`TTS returned non-audio response: ${contentType}`);
             }
+
+            // Get audio as arrayBuffer (more reliable than blob for base64-encoded responses)
+            const arrayBuffer = await response.arrayBuffer();
+            console.log('Audio arrayBuffer received, size:', arrayBuffer.byteLength, 'bytes');
             
-            const audioUrl = URL.createObjectURL(audioBlob);
+            if (!arrayBuffer || arrayBuffer.byteLength < 1000) {
+                console.error('TTS returned tiny or empty audio (', arrayBuffer?.byteLength, 'bytes)');
+                throw new Error(`TTS returned tiny audio (${arrayBuffer?.byteLength} bytes)`);
+            }
+
+            // Create blob with correct MIME type
+            const blob = new Blob([arrayBuffer], { 
+                type: contentType.includes('audio') ? contentType : 'audio/mpeg' 
+            });
+            const audioUrl = URL.createObjectURL(blob);
             console.log('Audio URL created:', audioUrl);
             
             // Play audio
             return new Promise((resolve, reject) => {
+                // Store reject callback so stop() can reject this promise
+                this.currentRejectCallback = reject;
+
                 // Double-check we're not stopping and no other audio is playing
                 if (this.isStopping || this.currentAudio || this.isPlaying) {
                     URL.revokeObjectURL(audioUrl);
                     reject(new Error('TTS service is stopping or another audio is playing'));
+                    this.currentRejectCallback = null;
                     return;
                 }
                 
@@ -355,16 +407,15 @@ class TTSService {
                             this.currentAudio = null;
                             this.currentAudioUrl = null;
                             this.isPlaying = false;
+                            this.currentRejectCallback = null; // Clear reject callback
                         }
                         reject(new Error('Audio playback aborted'));
                     }
                 };
 
-                // Set audio properties for fast playback
+                // Set audio properties
                 audio.volume = options.volume !== undefined ? options.volume : 1;
                 audio.preload = 'auto';
-                // Start loading immediately
-                audio.load();
 
                 console.log('Audio element created, attempting to play...');
                 console.log('Audio properties:', {
@@ -373,18 +424,87 @@ class TTSService {
                     paused: audio.paused
                 });
 
-                // Wait for audio to be ready - start playing as soon as we have enough data
-                const tryPlay = () => {
+                // Add debug event listeners
+                audio.onplay = () => {
+                    console.log('🔊 Audio onplay fired - audio is actually playing');
+                };
+
+                audio.onended = () => {
+                    console.log('✅ Audio onended fired - playback completed');
+                    // Remove from pending list
+                    const index = this.pendingAudio.indexOf(audioData);
+                    if (index > -1) {
+                        this.pendingAudio.splice(index, 1);
+                    }
+                    
+                    // Only process if this is still the current audio
+                    if (this.currentAudio === audio) {
+                        this.isPlaying = false;
+                        if (this.currentAudioUrl) {
+                            URL.revokeObjectURL(this.currentAudioUrl);
+                            this.currentAudioUrl = null;
+                        }
+                        const callback = this.onEndCallback;
+                        this.currentAudio = null;
+                        this.currentRejectCallback = null; // Clear reject callback
+                        if (callback) {
+                            callback();
+                        }
+                        resolve();
+                    } else {
+                        // Audio was stopped/replaced, just cleanup
+                        console.log('Audio ended but was already stopped/replaced');
+                        URL.revokeObjectURL(audioUrl);
+                    }
+                };
+
+                audio.onerror = (error) => {
+                    console.log('❌ Audio onerror fired:', error);
+                    // Remove from pending list
+                    const index = this.pendingAudio.indexOf(audioData);
+                    if (index > -1) {
+                        this.pendingAudio.splice(index, 1);
+                    }
+
+                    this.isPlaying = false;
+                    if (this.currentAudio === audio) {
+                        if (this.currentAudioUrl) {
+                            URL.revokeObjectURL(this.currentAudioUrl);
+                            this.currentAudioUrl = null;
+                        }
+                        this.currentAudio = null;
+                        this.currentRejectCallback = null; // Clear reject callback
+                    }
+                    URL.revokeObjectURL(audioUrl);
+                    console.error('Audio error details:', {
+                        code: audio.error?.code,
+                        message: audio.error?.message,
+                        MEDIA_ERR_ABORTED: 1,
+                        MEDIA_ERR_NETWORK: 2,
+                        MEDIA_ERR_DECODE: 3,
+                        MEDIA_ERR_SRC_NOT_SUPPORTED: 4
+                    });
+                    if (this.onErrorCallback) {
+                        this.onErrorCallback(error);
+                    }
+                    reject(new Error(`Audio element error while playing: ${audio.error?.message || 'Unknown error'}`));
+                };
+
+                audio.onpause = () => {
+                    console.log('Audio paused');
+                };
+
+                // Wait for audio to be ready, then play
+                const tryPlay = async () => {
                     // Check if we should abort before playing
                     if (this.isStopping || this.currentAudio !== audio) {
                         abortHandler();
                         return;
                     }
                     
-                    // Use HAVE_FUTURE_DATA (3) or HAVE_CURRENT_DATA (2) for faster start
-                    // HAVE_ENOUGH_DATA (4) waits for full buffer, causing delays
+                    // Use HAVE_CURRENT_DATA (2) for faster start
                     if (audio.readyState >= 2) { // HAVE_CURRENT_DATA - enough to start playing
-                        console.log('Audio ready, attempting play...');
+                        console.log('Audio ready (readyState:', audio.readyState, '), attempting play...');
                         
                         // Final check before playing
                         if (this.isStopping || this.currentAudio !== audio) {
@@ -392,26 +512,22 @@ class TTSService {
                             return;
                         }
                         
-                        audio.play().then(() => {
-                            // Check again after play promise resolves
-                            if (this.isStopping || this.currentAudio !== audio) {
-                                audio.pause();
-                                audio.currentTime = 0;
-                                abortHandler();
-                                return;
-                            }
+                        // CRITICAL: await audio.play() and handle rejection
+                        try {
+                            await audio.play();
                             console.log('✓ Audio play() promise resolved - audio should be playing');
-                        }).catch(error => {
-                            console.error('✗ Failed to play audio:', error);
+                        } catch (playError) {
+                            console.error('✗ Failed to play audio:', playError);
                             console.error('Play error details:', {
-                                name: error.name,
-                                message: error.message,
-                                code: error.code
+                                name: playError.name,
+                                message: playError.message,
+                                code: playError.code
                             });
                             
-                            // If autoplay is blocked, try to provide user feedback
-                            if (error.name === 'NotAllowedError') {
+                            // If autoplay is blocked, provide clear error
+                            if (playError.name === 'NotAllowedError') {
                                 console.error('Autoplay blocked - user interaction required');
+                                throw new Error(`Audio play() failed (autoplay blocked?): ${playError.message || playError}`);
                             }
                             
                             this.isPlaying = false;
@@ -420,8 +536,8 @@ class TTSService {
                                 this.pendingAudio.splice(index, 1);
                             }
                             URL.revokeObjectURL(audioUrl);
-                            reject(error);
-                        });
+                            throw new Error(`Audio play() failed: ${playError.message || playError}`);
+                        }
                     } else {
                         // Check more frequently for faster response
                         setTimeout(tryPlay, 10);
@@ -442,74 +558,8 @@ class TTSService {
                     console.log('Audio can play through');
                 };
 
-                audio.onended = () => {
-                    // Remove from pending list
-                    const index = this.pendingAudio.indexOf(audioData);
-                    if (index > -1) {
-                        this.pendingAudio.splice(index, 1);
-                    }
-                    
-                    // Only process if this is still the current audio
-                    if (this.currentAudio === audio) {
-                        console.log('✓ Audio playback ended');
-                        this.isPlaying = false;
-                        if (this.currentAudioUrl) {
-                            URL.revokeObjectURL(this.currentAudioUrl);
-                            this.currentAudioUrl = null;
-                        }
-                        const callback = this.onEndCallback;
-                        this.currentAudio = null;
-                        if (callback) {
-                            callback();
-                        }
-                        resolve();
-                    } else {
-                        // Audio was stopped/replaced, just cleanup
-                        console.log('Audio ended but was already stopped/replaced');
-                        URL.revokeObjectURL(audioUrl);
-                    }
-                };
-
-                audio.onerror = (error) => {
-                    // Remove from pending list
-                    const index = this.pendingAudio.indexOf(audioData);
-                    if (index > -1) {
-                        this.pendingAudio.splice(index, 1);
-                    }
-                    
-                    this.isPlaying = false;
-                    if (this.currentAudio === audio) {
-                        if (this.currentAudioUrl) {
-                            URL.revokeObjectURL(this.currentAudioUrl);
-                            this.currentAudioUrl = null;
-                        }
-                        this.currentAudio = null;
-                    }
-                    URL.revokeObjectURL(audioUrl);
-                    console.error('✗ Audio playback error:', error);
-                    console.error('Audio error details:', {
-                        code: audio.error?.code,
-                        message: audio.error?.message,
-                        MEDIA_ERR_ABORTED: 1,
-                        MEDIA_ERR_NETWORK: 2,
-                        MEDIA_ERR_DECODE: 3,
-                        MEDIA_ERR_SRC_NOT_SUPPORTED: 4
-                    });
-                    if (this.onErrorCallback) {
-                        this.onErrorCallback(error);
-                    }
-                    reject(error);
-                };
-
-                audio.onplay = () => {
-                    console.log('✓ Audio started playing');
-                };
-
-                audio.onpause = () => {
-                    console.log('Audio paused');
-                };
-
-                // Audio.load() is called earlier for faster start
+                // Start loading immediately
+                audio.load();
             });
 
         } catch (error) {
@@ -521,8 +571,12 @@ class TTSService {
 
     speakWithBrowser(text, options = {}) {
         return new Promise((resolve, reject) => {
+            // Store reject callback so stop() can reject this promise
+            this.currentRejectCallback = reject;
+
             if (!this.synthesis) {
                 reject(new Error('Browser TTS not available'));
+                this.currentRejectCallback = null;
                 return;
             }
 
@@ -543,16 +597,22 @@ class TTSService {
                 // Only process if we're still playing (not cancelled)
                 if (this.isPlaying) {
                     this.isPlaying = false;
+                    this.currentRejectCallback = null; // Clear reject callback
                     const callback = this.onEndCallback;
                     if (callback) {
                         callback();
                     }
                     resolve();
+                } else {
+                    // Speech was cancelled, reject the promise
+                    this.currentRejectCallback = null;
+                    reject(new Error('Browser TTS cancelled'));
                 }
             };
 
             utterance.onerror = (event) => {
                 this.isPlaying = false;
+                this.currentRejectCallback = null; // Clear reject callback
                 console.error('Browser TTS error:', event);
                 if (this.onErrorCallback) {
                     this.onErrorCallback(event);
@@ -579,12 +639,11 @@ class TTSService {
             this.currentAudio.oncanplaythrough = null;
             this.currentAudio.onloadeddata = null;
             
-            // Force stop the audio
+            // Force stop the audio (but don't destroy the element - it will be reused)
             try {
                 this.currentAudio.pause();
                 this.currentAudio.currentTime = 0;
-                // Load empty source to fully stop
-                this.currentAudio.src = '';
+                // Don't set src to '' - keep the element for reuse
             } catch (e) {
                 console.warn('Error stopping audio:', e);
             }
@@ -599,7 +658,9 @@ class TTSService {
                 this.currentAudioUrl = null;
             }
             
+            // Clear current audio (new one will be created in next speak() call)
             this.currentAudio = null;
+            this.isPlaying = false;
         }
         
         // Stop and cleanup all pending audio instances
@@ -635,8 +696,15 @@ class TTSService {
         }
         
         this.isPlaying = false;
-        // Clear callbacks to prevent them from firing
-        this.onEndCallback = null;
+
+        // Reject any pending promise to prevent hanging
+        if (this.currentRejectCallback) {
+            this.currentRejectCallback(new Error('TTS stopped'));
+            this.currentRejectCallback = null;
+        }
+
+        // Note: Don't clear onEndCallback/onErrorCallback here as they are needed for future TTS operations
+        // The audio element event handlers are already cleared above to prevent them from firing
         
         // Small delay to ensure audio has actually stopped
         setTimeout(() => {
