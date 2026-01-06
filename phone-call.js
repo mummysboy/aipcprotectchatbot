@@ -1,29 +1,90 @@
 // Phone Call Component JavaScript
 
 class PhoneCall {
-    constructor() {
+    constructor(options = {}) {
         this.callContainer = null;
         this.isInitialized = false;
-        this.synthesis = null;
-        this.currentUtterance = null;
+        this.ttsService = null;
+        this.recognition = null;
         this.speechQueue = [];
         this.isSpeaking = false;
+        this.waitingForResponse = false;
+        this.isHangingUp = false;
+        this.selectedVoice = options.voice || null; // Voice name or null for default
+        this.voiceGender = options.voiceGender || null; // 'male' or 'female' to filter
+        this.voiceLang = options.voiceLang || 'en-US'; // Language preference
+        
+        // TTS Provider options
+        this.ttsProvider = options.ttsProvider || 'browser'; // 'elevenlabs' or 'browser'
+        this.elevenLabsVoiceId = options.elevenLabsVoiceId || null;
     }
 
     init() {
         if (this.isInitialized) return;
 
-        // Check for browser TTS support
-        if ('speechSynthesis' in window) {
-            this.synthesis = window.speechSynthesis;
+        // Initialize TTS service
+        this.initTTS();
+
+        // Check for speech recognition support
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (SpeechRecognition) {
+            this.recognition = new SpeechRecognition();
+            this.recognition.continuous = false;
+            this.recognition.interimResults = false;
+            this.recognition.lang = this.voiceLang;
+            
+            this.recognition.onresult = (event) => {
+                const transcript = event.results[0][0].transcript.toLowerCase().trim();
+                this.handleUserResponse(transcript);
+            };
+
+            this.recognition.onerror = (event) => {
+                console.error('Speech recognition error:', event.error);
+                // If error, show manual buttons as fallback
+                this.showManualButtons();
+            };
+
+            this.recognition.onend = () => {
+                // Restart if still waiting for response
+                if (this.waitingForResponse) {
+                    try {
+                        this.recognition.start();
+                    } catch (e) {
+                        // Recognition already started or error
+                        this.showManualButtons();
+                    }
+                }
+            };
         } else {
-            console.warn('Text-to-speech not supported in this browser');
+            console.warn('Speech recognition not supported in this browser');
         }
 
         this.createCallHTML();
         this.callContainer = document.getElementById('phoneCall');
         this.setupEventListeners();
         this.isInitialized = true;
+    }
+
+    initTTS() {
+        // Initialize TTS service (ElevenLabs or browser fallback)
+        this.ttsService = new TTSService({
+            provider: this.ttsProvider,
+            apiKey: null, // API key handled by server
+            voiceId: this.elevenLabsVoiceId,
+            voiceLang: this.voiceLang
+        });
+        
+        this.ttsService.init();
+        
+        // Set up callbacks
+        this.ttsService.setOnEnd(() => {
+            this.isSpeaking = false;
+        });
+        
+        this.ttsService.setOnError((error) => {
+            console.error('TTS error:', error);
+            this.isSpeaking = false;
+        });
     }
 
     createCallHTML() {
@@ -75,6 +136,16 @@ class PhoneCall {
 
                     <div class="call-captions">
                         <p id="captionText" class="caption-text">Connecting...</p>
+                        <div id="responsePrompt" class="response-prompt" style="display: none;">
+                            <p class="prompt-text">Say Yes or No</p>
+                            <div class="manual-buttons" id="manualButtons" style="display: none;">
+                                <button class="response-btn yes-btn" id="manualYesBtn">Yes</button>
+                                <button class="response-btn no-btn" id="manualNoBtn">No</button>
+                            </div>
+                        </div>
+                        <button id="installNowBtn" class="install-now-btn" style="display: none;">
+                            Install Now
+                        </button>
                     </div>
                 </div>
 
@@ -110,11 +181,11 @@ class PhoneCall {
         const speakerBtn = document.getElementById('speakerBtn');
 
         if (closeBtn) {
-            closeBtn.addEventListener('click', () => this.endCall());
+            closeBtn.addEventListener('click', () => this.handleHangUpAttempt());
         }
 
         if (hangupBtn) {
-            hangupBtn.addEventListener('click', () => this.endCall());
+            hangupBtn.addEventListener('click', () => this.handleHangUpAttempt());
         }
 
         if (muteBtn) {
@@ -123,6 +194,27 @@ class PhoneCall {
 
         if (speakerBtn) {
             speakerBtn.addEventListener('click', () => this.toggleSpeaker());
+        }
+
+        // Manual response buttons (fallback)
+        const manualYesBtn = document.getElementById('manualYesBtn');
+        const manualNoBtn = document.getElementById('manualNoBtn');
+        const installNowBtn = document.getElementById('installNowBtn');
+
+        if (manualYesBtn) {
+            manualYesBtn.addEventListener('click', () => this.handleUserResponse('yes'));
+        }
+
+        if (manualNoBtn) {
+            manualNoBtn.addEventListener('click', () => this.handleUserResponse('no'));
+        }
+
+        if (installNowBtn) {
+            installNowBtn.addEventListener('click', () => {
+                // TODO: Handle install action
+                console.log('Install Now clicked');
+                this.updateCaption('Installing AI PC Protect Pro...');
+            });
         }
     }
 
@@ -181,7 +273,20 @@ class PhoneCall {
         messages.push("We can fix these issues immediately, before they're exploited.");
         messages.push("Would you like me to take care of that for you now?");
 
-        return messages;
+        return { messages, waitForResponse: true };
+    }
+
+    getSalesPitch() {
+        return [
+            "I understand your hesitation. Let me explain why this is so critical right now.",
+            "Every day, thousands of computers are compromised through these exact vulnerabilities. The average cost of a data breach for individuals can be devastating—not just financially, but in terms of lost personal information, compromised accounts, and the time it takes to recover.",
+            "What makes AI PC Protect Pro different is that we don't just fix these issues once. We provide continuous, real-time protection that adapts to new threats as they emerge.",
+            "Think of it this way: you wouldn't leave your front door unlocked, even if you're just going to the store for a few minutes. These vulnerabilities are like leaving multiple doors and windows open 24/7.",
+            "For less than the cost of a cup of coffee per month, you get enterprise-grade protection that monitors your system around the clock, encrypts sensitive data, and prevents attacks before they can cause damage.",
+            "Many of our users tell us they wish they had signed up sooner, before they experienced a security incident. Don't wait until it's too late.",
+            "We're offering a special limited-time discount for new users. Plus, if you're not completely satisfied within the first 30 days, we offer a full refund—no questions asked.",
+            "Your security is worth protecting. Would you like to secure your system now?"
+        ];
     }
 
     startCall(data) {
@@ -192,6 +297,7 @@ class PhoneCall {
         }
 
         this.show();
+        this.waitingForResponse = false;
         
         // Update agent name in header if provided
         const agentName = data.agentName || "AI PC Protect Agent";
@@ -201,7 +307,9 @@ class PhoneCall {
         }
         
         // Convert data to speech messages
-        const speechMessages = this.convertDataToSpeech(data);
+        const result = this.convertDataToSpeech(data);
+        const speechMessages = result.messages || result; // Handle both old and new format
+        this.waitingForResponse = (result && result.waitForResponse) || false;
         
         // Start speaking after a brief connection delay
         setTimeout(() => {
@@ -215,10 +323,156 @@ class PhoneCall {
         this.processSpeechQueue();
     }
 
+    showResponsePrompt() {
+        const responsePrompt = document.getElementById('responsePrompt');
+        const promptText = responsePrompt?.querySelector('.prompt-text');
+        
+        if (responsePrompt) {
+            responsePrompt.style.display = 'block';
+        }
+        
+        // Update prompt text based on context
+        if (promptText) {
+            if (this.isHangingUp) {
+                promptText.textContent = 'Say Yes to stay, or No to hang up';
+            } else {
+                promptText.textContent = 'Say Yes or No';
+            }
+        }
+        
+        // Start speech recognition
+        if (this.recognition && !this.waitingForResponse) {
+            this.waitingForResponse = true;
+            try {
+                this.recognition.start();
+            } catch (e) {
+                console.warn('Could not start speech recognition:', e);
+                this.showManualButtons();
+            }
+        } else if (!this.recognition) {
+            // Fallback to manual buttons if no speech recognition
+            this.showManualButtons();
+        }
+    }
+
+    showManualButtons() {
+        const manualButtons = document.getElementById('manualButtons');
+        const yesBtn = document.getElementById('manualYesBtn');
+        const noBtn = document.getElementById('manualNoBtn');
+        
+        if (manualButtons) {
+            manualButtons.style.display = 'flex';
+        }
+        
+        // Update button text based on context
+        if (this.isHangingUp) {
+            if (yesBtn) yesBtn.textContent = 'Stay';
+            if (noBtn) noBtn.textContent = 'Hang Up';
+        } else {
+            if (yesBtn) yesBtn.textContent = 'Yes';
+            if (noBtn) noBtn.textContent = 'No';
+        }
+    }
+
+    hideResponsePrompt() {
+        const responsePrompt = document.getElementById('responsePrompt');
+        if (responsePrompt) {
+            responsePrompt.style.display = 'none';
+        }
+        this.waitingForResponse = false;
+        if (this.recognition) {
+            try {
+                this.recognition.stop();
+            } catch (e) {
+                // Already stopped
+            }
+        }
+    }
+
+    handleUserResponse(transcript) {
+        this.hideResponsePrompt();
+        
+        // Check for yes/no variations
+        const isYes = transcript.includes('yes') || transcript.includes('yeah') || 
+                     transcript.includes('sure') || transcript.includes('okay') ||
+                     transcript.includes('ok') || transcript.includes('yep') ||
+                     transcript.includes('stay') || transcript.includes('continue');
+        
+        const isNo = transcript.includes('no') || transcript.includes('nope') || 
+                    transcript.includes('not') || transcript.includes('nah') ||
+                    transcript.includes('hang up') || transcript.includes('end call') ||
+                    transcript.includes('disconnect');
+
+        // If in hang up flow
+        if (this.isHangingUp) {
+            if (isYes) {
+                // User wants to stay - cancel hang up and show install button
+                this.isHangingUp = false;
+                this.updateCaption("I'm glad you're staying. Let's get you protected right away.");
+                setTimeout(() => {
+                    this.showInstallButton();
+                }, 2000);
+            } else if (isNo) {
+                // User confirms they want to hang up
+                this.endCall();
+            } else {
+                // Unclear response
+                this.updateCaption("I didn't catch that. Please say Yes to stay, or No to hang up.");
+                setTimeout(() => {
+                    this.showResponsePrompt();
+                }, 2000);
+            }
+            return;
+        }
+
+        // Normal flow (not hanging up)
+        if (isYes) {
+            this.showInstallButton();
+        } else if (isNo) {
+            this.continueWithSalesPitch();
+        } else {
+            // Unclear response, ask again
+            this.updateCaption("I didn't catch that. Please say Yes or No.");
+            setTimeout(() => {
+                this.showResponsePrompt();
+            }, 2000);
+        }
+    }
+
+    showInstallButton() {
+        const installBtn = document.getElementById('installNowBtn');
+        if (installBtn) {
+            installBtn.style.display = 'block';
+        }
+        this.updateCaption("Great! Click the Install Now button below to get started.");
+    }
+
+    continueWithSalesPitch() {
+        const salesPitch = this.getSalesPitch();
+        // Mark that we'll wait for response after sales pitch
+        this.waitingForResponse = true;
+        this.speakMessages(salesPitch);
+    }
+
     processSpeechQueue() {
         if (this.speechQueue.length === 0) {
             this.isSpeaking = false;
             this.stopWaveform();
+            
+            // Check if we're in hang up flow
+            if (this.isHangingUp) {
+                // After hang up pitch, wait for response
+                this.waitingForResponse = true;
+                this.showResponsePrompt();
+                return;
+            }
+            
+            // Check if we should wait for user response
+            if (this.waitingForResponse) {
+                this.showResponsePrompt();
+                return;
+            }
+            
             this.updateCaption("Call ended.");
             return;
         }
@@ -229,42 +483,39 @@ class PhoneCall {
         this.speak(message);
     }
 
-    speak(text) {
-        if (!this.synthesis) {
+    async speak(text) {
+        if (!this.ttsService) {
             // Fallback: just show text if TTS not available
             this.updateCaption(text);
             setTimeout(() => this.processSpeechQueue(), 2000);
             return;
         }
 
-        // Cancel any ongoing speech
-        this.synthesis.cancel();
+        // Stop any ongoing speech
+        this.ttsService.stop();
 
         this.isSpeaking = true;
         this.startWaveform();
         this.updateCaption(text);
 
-        const utterance = new SpeechSynthesisUtterance(text);
-        utterance.rate = 0.9;
-        utterance.pitch = 1;
-        utterance.volume = 1;
-        
-        utterance.onend = () => {
+        try {
+            await this.ttsService.speak(text, {
+                rate: 0.9,
+                pitch: 1,
+                volume: 1,
+                lang: this.voiceLang
+            });
+            
             this.isSpeaking = false;
             this.stopWaveform();
             // Small delay before next message
             setTimeout(() => this.processSpeechQueue(), 500);
-        };
-
-        utterance.onerror = (event) => {
-            console.error('Speech synthesis error:', event);
+        } catch (error) {
+            console.error('Error speaking:', error);
             this.isSpeaking = false;
             this.stopWaveform();
             setTimeout(() => this.processSpeechQueue(), 500);
-        };
-
-        this.currentUtterance = utterance;
-        this.synthesis.speak(utterance);
+        }
     }
 
     startWaveform() {
@@ -297,12 +548,10 @@ class PhoneCall {
     }
 
     toggleMute() {
-        if (this.synthesis && this.currentUtterance) {
-            if (this.synthesis.speaking) {
-                this.synthesis.pause();
-            } else {
-                this.synthesis.resume();
-            }
+        // Mute functionality - stop current speech
+        if (this.ttsService && this.isSpeaking) {
+            this.ttsService.stop();
+            this.isSpeaking = false;
         }
     }
 
@@ -314,14 +563,72 @@ class PhoneCall {
         }
     }
 
+    handleHangUpAttempt() {
+        // If already in hang up flow, actually end the call
+        if (this.isHangingUp) {
+            this.endCall();
+            return;
+        }
+
+        // Stop any ongoing speech
+        if (this.ttsService) {
+            this.ttsService.stop();
+        }
+        
+        // Stop speech recognition
+        if (this.recognition) {
+            try {
+                this.recognition.stop();
+            } catch (e) {
+                // Already stopped
+            }
+        }
+
+        this.isHangingUp = true;
+        this.waitingForResponse = false;
+        this.hideResponsePrompt();
+        
+        // Hide install button if visible
+        const installBtn = document.getElementById('installNowBtn');
+        if (installBtn) {
+            installBtn.style.display = 'none';
+        }
+
+        // Play warning pitch
+        const hangUpPitch = this.getHangUpPitch();
+        this.speakMessages(hangUpPitch);
+    }
+
+    getHangUpPitch() {
+        return [
+            "Wait, are you sure? Attackers may already be exploiting these vulnerabilities on your system right now.",
+            "Every second you delay securing your computer increases your risk of a breach. These aren't theoretical threats—they're active, real dangers that criminals use every single day.",
+            "I've seen systems compromised in minutes after vulnerabilities like these were discovered. Your personal information, financial data, and even your identity could be at stake.",
+            "The good news is we can protect you immediately. AI PC Protect Pro will secure your system in just a few minutes, and you'll have peace of mind knowing you're protected.",
+            "Don't let a moment of hesitation cost you everything. Your security is too important to ignore.",
+            "Will you stay on the line and let me help you secure your system right now?"
+        ];
+    }
+
     endCall() {
         // Stop any ongoing speech
-        if (this.synthesis) {
-            this.synthesis.cancel();
+        if (this.ttsService) {
+            this.ttsService.stop();
+        }
+        
+        // Stop speech recognition
+        if (this.recognition) {
+            try {
+                this.recognition.stop();
+            } catch (e) {
+                // Already stopped
+            }
         }
         
         this.isSpeaking = false;
         this.speechQueue = [];
+        this.waitingForResponse = false;
+        this.isHangingUp = false;
         this.stopWaveform();
         this.hide();
     }

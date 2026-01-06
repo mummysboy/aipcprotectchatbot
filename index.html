@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>PCProtect ChatBot</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛡️</text></svg>">
     <link rel="stylesheet" href="styles.css">
     <link rel="stylesheet" href="chatbot-popup.css">
     <link rel="stylesheet" href="phone-call.css">
@@ -22,6 +23,19 @@
         </main>
     </div>
 
+    <script>
+        // Unregister any existing service workers that might be interfering
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.getRegistrations().then(function(registrations) {
+                for(let registration of registrations) {
+                    registration.unregister();
+                    console.log('Service worker unregistered');
+                }
+            });
+        }
+    </script>
+    <script src="chatgpt-service.js"></script>
+    <script src="tts-service.js"></script>
     <script src="chatbot-popup.js"></script>
     <script src="phone-call.js"></script>
     <script src="script.js"></script>

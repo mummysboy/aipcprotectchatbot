@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice Tester - PCProtect ChatBot</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 2rem;
+            color: #333;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 16px;
+            padding: 2rem;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+        }
+
+        h1 {
+            color: #333;
+            margin-bottom: 1rem;
+            font-size: 2rem;
+        }
+
+        .subtitle {
+            color: #666;
+            margin-bottom: 2rem;
+            font-size: 1rem;
+        }
+
+        .controls {
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 2rem;
+            flex-wrap: wrap;
+        }
+
+        .control-group {
+            flex: 1;
+            min-width: 200px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-weight: 600;
+            color: #333;
+        }
+
+        select, input, button {
+            width: 100%;
+            padding: 0.75rem;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 1rem;
+            transition: all 0.2s;
+        }
+
+        select:focus, input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            cursor: pointer;
+            font-weight: 600;
+            margin-top: 1.5rem;
+        }
+
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+
+        button:active {
+            transform: translateY(0);
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .test-button {
+            background: #10b981;
+            margin-top: 0;
+        }
+
+        .test-button:hover {
+            box-shadow: 0 4px 12px rgba(16, 185, 129, 0.4);
+        }
+
+        .voices-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 1rem;
+            margin-top: 2rem;
+        }
+
+        .voice-card {
+            border: 2px solid #e0e0e0;
+            border-radius: 12px;
+            padding: 1rem;
+            transition: all 0.2s;
+            cursor: pointer;
+        }
+
+        .voice-card:hover {
+            border-color: #667eea;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+        }
+
+        .voice-card.selected {
+            border-color: #667eea;
+            background: #f0f4ff;
+        }
+
+        .voice-name {
+            font-weight: 600;
+            font-size: 1.1rem;
+            color: #333;
+            margin-bottom: 0.5rem;
+        }
+
+        .voice-details {
+            font-size: 0.9rem;
+            color: #666;
+            margin-bottom: 0.5rem;
+        }
+
+        .voice-badge {
+            display: inline-block;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            margin-right: 0.5rem;
+            margin-top: 0.5rem;
+        }
+
+        .badge-local {
+            background: #10b981;
+            color: white;
+        }
+
+        .badge-remote {
+            background: #f59e0b;
+            color: white;
+        }
+
+        .badge-default {
+            background: #667eea;
+            color: white;
+        }
+
+        .test-text {
+            margin-top: 1rem;
+            padding: 1rem;
+            background: #f5f5f5;
+            border-radius: 8px;
+            font-size: 0.9rem;
+            color: #666;
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 2rem;
+            padding: 1rem;
+            background: #f5f5f5;
+            border-radius: 8px;
+        }
+
+        .stat-item {
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 2rem;
+            font-weight: 700;
+            color: #667eea;
+        }
+
+        .stat-label {
+            font-size: 0.9rem;
+            color: #666;
+            margin-top: 0.25rem;
+        }
+
+        .copy-code {
+            background: #1a1a1a;
+            color: #10b981;
+            padding: 1rem;
+            border-radius: 8px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9rem;
+            margin-top: 1rem;
+            word-break: break-all;
+            cursor: pointer;
+            position: relative;
+        }
+
+        .copy-code:hover {
+            background: #2a2a2a;
+        }
+
+        .copy-button {
+            position: absolute;
+            top: 0.5rem;
+            right: 0.5rem;
+            background: #10b981;
+            color: white;
+            border: none;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            cursor: pointer;
+        }
+
+        .filter-buttons {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+            flex-wrap: wrap;
+        }
+
+        .filter-btn {
+            padding: 0.5rem 1rem;
+            background: #f5f5f5;
+            border: 2px solid #e0e0e0;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: all 0.2s;
+            margin-top: 0;
+        }
+
+        .filter-btn.active {
+            background: #667eea;
+            color: white;
+            border-color: #667eea;
+        }
+
+        .filter-btn:hover {
+            border-color: #667eea;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎤 Voice Tester</h1>
+        <p class="subtitle">Discover and test all available text-to-speech voices in your browser</p>
+
+        <div class="stats" id="stats">
+            <div class="stat-item">
+                <div class="stat-value" id="totalVoices">0</div>
+                <div class="stat-label">Total Voices</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value" id="localVoices">0</div>
+                <div class="stat-label">Local Voices</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-value" id="englishVoices">0</div>
+                <div class="stat-label">English Voices</div>
+            </div>
+        </div>
+
+        <div class="controls">
+            <div class="control-group">
+                <label>Test Text</label>
+                <input type="text" id="testText" value="Hello! I'm your AI PC Protect Agent. How can I help you with your security needs today?" placeholder="Enter text to test">
+            </div>
+            <div class="control-group">
+                <label>Filter Voices</label>
+                <div class="filter-buttons">
+                    <button class="filter-btn active" data-filter="all">All</button>
+                    <button class="filter-btn" data-filter="local">Local Only</button>
+                    <button class="filter-btn" data-filter="english">English Only</button>
+                    <button class="filter-btn" data-filter="female">Female</button>
+                    <button class="filter-btn" data-filter="male">Male</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="voices-grid" id="voicesGrid"></div>
+
+        <div id="selectedVoiceCode" style="display: none;">
+            <h3 style="margin-top: 2rem; margin-bottom: 1rem;">Selected Voice Configuration</h3>
+            <div class="copy-code" id="codeBlock">
+                <button class="copy-button" onclick="copyCode()">Copy</button>
+                <pre id="codeContent"></pre>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let voices = [];
+        let selectedVoice = null;
+        let currentFilter = 'all';
+        let synthesis = null;
+
+        function init() {
+            if ('speechSynthesis' in window) {
+                synthesis = window.speechSynthesis;
+                loadVoices();
+            } else {
+                document.getElementById('voicesGrid').innerHTML = 
+                    '<p style="color: #ef4444; padding: 2rem; text-align: center;">Text-to-speech is not supported in this browser.</p>';
+            }
+
+            // Setup filter buttons
+            document.querySelectorAll('.filter-btn').forEach(btn => {
+                btn.addEventListener('click', () => {
+                    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+                    btn.classList.add('active');
+                    currentFilter = btn.dataset.filter;
+                    displayVoices();
+                });
+            });
+
+            // Test text input
+            document.getElementById('testText').addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') {
+                    testSelectedVoice();
+                }
+            });
+        }
+
+        function loadVoices() {
+            const availableVoices = synthesis.getVoices();
+            
+            if (availableVoices.length === 0) {
+                // Wait for voices to load
+                synthesis.onvoiceschanged = () => {
+                    voices = synthesis.getVoices();
+                    updateStats();
+                    displayVoices();
+                };
+            } else {
+                voices = availableVoices;
+                updateStats();
+                displayVoices();
+            }
+        }
+
+        function updateStats() {
+            const local = voices.filter(v => v.localService).length;
+            const english = voices.filter(v => v.lang.startsWith('en')).length;
+            
+            document.getElementById('totalVoices').textContent = voices.length;
+            document.getElementById('localVoices').textContent = local;
+            document.getElementById('englishVoices').textContent = english;
+        }
+
+        function displayVoices() {
+            const grid = document.getElementById('voicesGrid');
+            let filteredVoices = voices;
+
+            // Apply filters
+            switch(currentFilter) {
+                case 'local':
+                    filteredVoices = voices.filter(v => v.localService);
+                    break;
+                case 'english':
+                    filteredVoices = voices.filter(v => v.lang.startsWith('en'));
+                    break;
+                case 'female':
+                    filteredVoices = voices.filter(v => {
+                        const name = v.name.toLowerCase();
+                        return name.includes('female') || name.includes('samantha') || 
+                               name.includes('karen') || name.includes('susan') || 
+                               name.includes('zira') || name.includes('victoria') ||
+                               name.includes('kate') || name.includes('siri') ||
+                               (v.name.includes('Google') && name.includes('female'));
+                    });
+                    break;
+                case 'male':
+                    filteredVoices = voices.filter(v => {
+                        const name = v.name.toLowerCase();
+                        return name.includes('male') || name.includes('alex') || 
+                               name.includes('daniel') || name.includes('david') ||
+                               name.includes('mark') || name.includes('tom') ||
+                               (v.name.includes('Google') && name.includes('male'));
+                    });
+                    break;
+            }
+
+            grid.innerHTML = filteredVoices.map((voice, index) => {
+                const isSelected = selectedVoice && selectedVoice.name === voice.name;
+                const isLocal = voice.localService;
+                const isEnglish = voice.lang.startsWith('en');
+                
+                return `
+                    <div class="voice-card ${isSelected ? 'selected' : ''}" onclick="selectVoice('${voice.name.replace(/'/g, "\\'")}')">
+                        <div class="voice-name">${voice.name}</div>
+                        <div class="voice-details">
+                            <div><strong>Language:</strong> ${voice.lang}</div>
+                            <div><strong>Default:</strong> ${voice.default ? 'Yes' : 'No'}</div>
+                        </div>
+                        <div>
+                            ${isLocal ? '<span class="voice-badge badge-local">Local</span>' : '<span class="voice-badge badge-remote">Remote</span>'}
+                            ${voice.default ? '<span class="voice-badge badge-default">Default</span>' : ''}
+                            ${isEnglish ? '<span class="voice-badge" style="background: #3b82f6; color: white;">English</span>' : ''}
+                        </div>
+                        <button class="test-button" onclick="event.stopPropagation(); testVoice('${voice.name.replace(/'/g, "\\'")}')" style="margin-top: 0.5rem;">Test Voice</button>
+                    </div>
+                `;
+            }).join('');
+
+            updateSelectedVoiceCode();
+        }
+
+        function selectVoice(voiceName) {
+            selectedVoice = voices.find(v => v.name === voiceName);
+            displayVoices();
+        }
+
+        function testVoice(voiceName) {
+            const voice = voices.find(v => v.name === voiceName);
+            const testText = document.getElementById('testText').value || 
+                "Hello! I'm your AI PC Protect Agent. How can I help you with your security needs today?";
+            
+            if (!voice || !synthesis) return;
+
+            // Stop any ongoing speech
+            synthesis.cancel();
+
+            const utterance = new SpeechSynthesisUtterance(testText);
+            utterance.voice = voice;
+            utterance.rate = 0.9;
+            utterance.pitch = 1;
+            utterance.volume = 1;
+
+            synthesis.speak(utterance);
+        }
+
+        function testSelectedVoice() {
+            if (selectedVoice) {
+                testVoice(selectedVoice.name);
+            } else {
+                alert('Please select a voice first by clicking on a voice card.');
+            }
+        }
+
+        function updateSelectedVoiceCode() {
+            const codeDiv = document.getElementById('selectedVoiceCode');
+            const codeContent = document.getElementById('codeContent');
+            
+            if (selectedVoice) {
+                codeDiv.style.display = 'block';
+                const code = `const voiceOptions = {
+    voice: '${selectedVoice.name}', // ${selectedVoice.lang}${selectedVoice.localService ? ' (Local)' : ' (Remote)'}
+    voiceLang: '${selectedVoice.lang}'
+};`;
+                codeContent.textContent = code;
+            } else {
+                codeDiv.style.display = 'none';
+            }
+        }
+
+        function copyCode() {
+            const code = document.getElementById('codeContent').textContent;
+            navigator.clipboard.writeText(code).then(() => {
+                const btn = event.target;
+                const originalText = btn.textContent;
+                btn.textContent = 'Copied!';
+                setTimeout(() => {
+                    btn.textContent = originalText;
+                }, 2000);
+            });
+        }
+
+        // Initialize on page load
+        window.addEventListener('load', init);
+    </script>
+</body>
+</html>
+

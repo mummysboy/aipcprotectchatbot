@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Test ElevenLabs TTS</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 10px;
+        }
+        .subtitle {
+            color: #666;
+            margin-bottom: 30px;
+        }
+        .test-section {
+            margin-bottom: 30px;
+            padding: 20px;
+            background: #f9f9f9;
+            border-radius: 8px;
+        }
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #333;
+        }
+        input, textarea {
+            width: 100%;
+            padding: 10px;
+            border: 2px solid #ddd;
+            border-radius: 6px;
+            font-size: 14px;
+            margin-bottom: 15px;
+        }
+        textarea {
+            min-height: 100px;
+            font-family: inherit;
+        }
+        button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            margin-right: 10px;
+        }
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+        .status {
+            margin-top: 15px;
+            padding: 12px;
+            border-radius: 6px;
+            font-size: 14px;
+        }
+        .status.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .status.info {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+        .log {
+            margin-top: 15px;
+            padding: 12px;
+            background: #1a1a1a;
+            color: #10b981;
+            border-radius: 6px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        .log-entry {
+            margin-bottom: 5px;
+        }
+        .log-error {
+            color: #ef4444;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎤 ElevenLabs TTS Test</h1>
+        <p class="subtitle">Test your ElevenLabs configuration</p>
+
+        <div class="test-section">
+            <h2>1. Test Server Connection</h2>
+            <button onclick="testServerConnection()">Test API Connection</button>
+            <div id="serverStatus"></div>
+        </div>
+
+        <div class="test-section">
+            <h2>2. Test TTS</h2>
+            <label for="voiceId">Voice ID:</label>
+            <input type="text" id="voiceId" value="WZlYpi1yf6zJhNWXih74" placeholder="Enter ElevenLabs voice ID">
+            <small style="color: #666; display: block; margin-top: -10px; margin-bottom: 10px;">
+                Current: WZlYpi1yf6zJhNWXih74 (Hope) | Try: 21m00Tcm4TlvDq8ikWAM (Rachel)
+            </small>
+            
+            <label for="testText">Test Text:</label>
+            <textarea id="testText" placeholder="Enter text to convert to speech">Hello! This is a test of the ElevenLabs text-to-speech system.</textarea>
+            
+            <button onclick="testTTS()">Test TTS</button>
+            <button onclick="stopAudio()">Stop Audio</button>
+            <div id="ttsStatus"></div>
+        </div>
+
+        <div class="test-section">
+            <h2>3. Get Available Voices</h2>
+            <button onclick="getVoices()">Fetch Voices</button>
+            <div id="voicesStatus"></div>
+            <div id="voicesList"></div>
+        </div>
+
+        <div class="test-section">
+            <h2>Debug Log</h2>
+            <div id="debugLog" class="log"></div>
+        </div>
+    </div>
+
+    <script>
+        let currentAudio = null;
+
+        function log(message, isError = false) {
+            const logDiv = document.getElementById('debugLog');
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${isError ? 'log-error' : ''}`;
+            entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            logDiv.appendChild(entry);
+            logDiv.scrollTop = logDiv.scrollHeight;
+            console.log(message);
+        }
+
+        function showStatus(elementId, message, type = 'info') {
+            const element = document.getElementById(elementId);
+            element.innerHTML = `<div class="status ${type}">${message}</div>`;
+        }
+
+        async function testServerConnection() {
+            log('Testing server connection...');
+            showStatus('serverStatus', 'Testing...', 'info');
+            
+            try {
+                const response = await fetch('/api/tts/voices', {
+                    method: 'GET',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+                
+                // Check if response is actually JSON
+                const contentType = response.headers.get('content-type');
+                if (!contentType || !contentType.includes('application/json')) {
+                    const text = await response.text();
+                    log(`✗ Server returned non-JSON response (${contentType}): ${text.substring(0, 200)}`, true);
+                    showStatus('serverStatus', `✗ Server returned HTML instead of JSON. Is the server running?`, 'error');
+                    return;
+                }
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    log('✓ Server connection successful!');
+                    log(`✓ Found ${data.voices?.length || 0} voices`);
+                    showStatus('serverStatus', '✓ Server connection successful!', 'success');
+                } else {
+                    log(`✗ Server error: ${data.error || 'Unknown error'}`, true);
+                    showStatus('serverStatus', `✗ Error: ${data.error || 'Unknown error'}`, 'error');
+                }
+            } catch (error) {
+                log(`✗ Connection failed: ${error.message}`, true);
+                log(`✗ Full error: ${error.stack}`, true);
+                showStatus('serverStatus', `✗ Connection failed: ${error.message}`, 'error');
+            }
+        }
+
+        async function testTTS() {
+            const voiceId = document.getElementById('voiceId').value.trim();
+            const text = document.getElementById('testText').value.trim();
+            
+            if (!voiceId) {
+                showStatus('ttsStatus', 'Please enter a voice ID', 'error');
+                return;
+            }
+            
+            if (!text) {
+                showStatus('ttsStatus', 'Please enter test text', 'error');
+                return;
+            }
+
+            log(`Testing TTS with voice: ${voiceId}`);
+            showStatus('ttsStatus', 'Generating speech...', 'info');
+            
+            try {
+                const response = await fetch('/api/tts', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        text: text,
+                        voiceId: voiceId,
+                        modelId: 'eleven_monolingual_v1'
+                    })
+                });
+
+                if (!response.ok) {
+                    const error = await response.json().catch(() => ({}));
+                    log(`✗ TTS API error: ${error.error || response.statusText}`, true);
+                    showStatus('ttsStatus', `✗ Error: ${error.error || response.statusText}`, 'error');
+                    return;
+                }
+
+                log('✓ Audio received, playing...');
+                showStatus('ttsStatus', 'Playing audio...', 'info');
+
+                // Get audio blob
+                const audioBlob = await response.blob();
+                const audioUrl = URL.createObjectURL(audioBlob);
+                
+                // Stop any current audio
+                stopAudio();
+                
+                // Play audio
+                currentAudio = new Audio(audioUrl);
+                currentAudio.onended = () => {
+                    log('✓ Audio playback completed');
+                    showStatus('ttsStatus', '✓ Audio playback completed', 'success');
+                    URL.revokeObjectURL(audioUrl);
+                };
+                
+                currentAudio.onerror = (error) => {
+                    log(`✗ Audio playback error: ${error}`, true);
+                    showStatus('ttsStatus', '✗ Audio playback error', 'error');
+                    URL.revokeObjectURL(audioUrl);
+                };
+                
+                await currentAudio.play();
+                log('✓ Audio started playing');
+                
+            } catch (error) {
+                log(`✗ TTS error: ${error.message}`, true);
+                showStatus('ttsStatus', `✗ Error: ${error.message}`, 'error');
+            }
+        }
+
+        function stopAudio() {
+            if (currentAudio) {
+                currentAudio.pause();
+                currentAudio.currentTime = 0;
+                currentAudio = null;
+                log('Audio stopped');
+            }
+        }
+
+        async function getVoices() {
+            log('Fetching available voices...');
+            showStatus('voicesStatus', 'Fetching voices...', 'info');
+            
+            try {
+                const response = await fetch('/api/tts/voices', {
+                    method: 'GET',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+                
+                // Check if response is actually JSON
+                const contentType = response.headers.get('content-type');
+                if (!contentType || !contentType.includes('application/json')) {
+                    const text = await response.text();
+                    log(`✗ Server returned non-JSON response (${contentType}): ${text.substring(0, 200)}`, true);
+                    showStatus('voicesStatus', `✗ Server returned HTML instead of JSON. Check server logs.`, 'error');
+                    return;
+                }
+                
+                const data = await response.json();
+                
+                if (!response.ok) {
+                    log(`✗ Error fetching voices: ${data.error || 'Unknown error'}`, true);
+                    showStatus('voicesStatus', `✗ Error: ${data.error || 'Unknown error'}`, 'error');
+                    return;
+                }
+
+                log(`✓ Found ${data.voices?.length || 0} voices`);
+                showStatus('voicesStatus', `✓ Found ${data.voices?.length || 0} voices`, 'success');
+                
+                const voicesList = document.getElementById('voicesList');
+                if (data.voices && data.voices.length > 0) {
+                    let html = '<div style="margin-top: 15px;"><h3>Available Voices:</h3><ul>';
+                    data.voices.forEach(voice => {
+                        html += `<li><strong>${voice.name}</strong> (ID: <code>${voice.voice_id}</code>)`;
+                        if (voice.description) {
+                            html += ` - ${voice.description}`;
+                        }
+                        html += '</li>';
+                    });
+                    html += '</ul></div>';
+                    voicesList.innerHTML = html;
+                } else {
+                    voicesList.innerHTML = '<p>No voices found.</p>';
+                }
+                
+            } catch (error) {
+                log(`✗ Error: ${error.message}`, true);
+                log(`✗ Full error: ${error.stack}`, true);
+                showStatus('voicesStatus', `✗ Error: ${error.message}`, 'error');
+            }
+        }
+
+        // Auto-test server connection on load
+        window.addEventListener('load', () => {
+            log('Page loaded. Click "Test API Connection" to check your setup.');
+        });
+    </script>
+</body>
+</html>
+
