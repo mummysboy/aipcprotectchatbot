@@ -22,6 +22,8 @@ class TTSService {
         this.isPlaying = false;
         this.onEndCallback = null;
         this.onErrorCallback = null;
+        this.preloadedAudio = null; // Preloaded audio for next playback
+        this.preloadedAudio = null; // Preloaded audio for next playback
     }
 
     init() {
@@ -82,8 +84,110 @@ class TTSService {
         return this.speakWithBrowser(text, options);
     }
 
+    async preloadAudio(text, options = {}) {
+        // Preload audio in background without playing
+        if (this.provider !== 'elevenlabs' || !this.voiceId) {
+            return null;
+        }
+
+        try {
+            const voiceId = options.voiceId || this.voiceId;
+            const modelId = options.modelId || this.modelId;
+
+            const response = await fetch('/api/tts', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    text: text,
+                    voiceId: voiceId,
+                    modelId: modelId,
+                    stability: options.stability !== undefined ? options.stability : this.stability,
+                    similarityBoost: options.similarityBoost !== undefined ? options.similarityBoost : this.similarityBoost,
+                    style: options.style !== undefined ? options.style : this.style,
+                    useSpeakerBoost: options.useSpeakerBoost !== undefined ? options.useSpeakerBoost : this.useSpeakerBoost
+                })
+            });
+
+            if (!response.ok) {
+                return null;
+            }
+
+            const audioBlob = await response.blob();
+            if (audioBlob.size === 0) {
+                return null;
+            }
+
+            const audioUrl = URL.createObjectURL(audioBlob);
+            const audio = new Audio(audioUrl);
+            audio.preload = 'auto';
+            audio.load();
+            
+            // Store preloaded audio
+            if (this.preloadedAudio && this.preloadedAudio.url) {
+                URL.revokeObjectURL(this.preloadedAudio.url);
+            }
+            
+            this.preloadedAudio = {
+                audio: audio,
+                url: audioUrl,
+                text: text
+            };
+
+            return audio;
+        } catch (error) {
+            console.log('Preload error (non-critical):', error);
+            return null;
+        }
+    }
+
     async speakWithElevenLabs(text, options = {}) {
         try {
+            // Check if we have preloaded audio for this text
+            if (this.preloadedAudio && this.preloadedAudio.text === text) {
+                // Use preloaded audio for instant playback
+                const audio = this.preloadedAudio.audio;
+                const audioUrl = this.preloadedAudio.url;
+                this.preloadedAudio = null; // Clear preloaded audio
+                
+                // Stop any current audio
+                this.stop();
+                
+                // Play the preloaded audio
+                this.currentAudio = audio;
+                this.isPlaying = true;
+                audio.volume = options.volume !== undefined ? options.volume : 1;
+                
+                return new Promise((resolve, reject) => {
+                    const tryPlay = () => {
+                        if (audio.readyState >= 2) {
+                            audio.play().then(() => {
+                                console.log('✓ Playing preloaded audio');
+                            }).catch(reject);
+                        } else {
+                            setTimeout(tryPlay, 10);
+                        }
+                    };
+                    
+                    audio.onended = () => {
+                        if (this.currentAudio === audio) {
+                            this.isPlaying = false;
+                            URL.revokeObjectURL(audioUrl);
+                            const callback = this.onEndCallback;
+                            this.currentAudio = null;
+                            if (callback) callback();
+                            resolve();
+                        } else {
+                            URL.revokeObjectURL(audioUrl);
+                        }
+                    };
+                    
+                    audio.onerror = reject;
+                    tryPlay();
+                });
+            }
+
             // Stop any current audio
             this.stop();
 
@@ -157,9 +261,11 @@ class TTSService {
                 this.currentAudio = audio;
                 this.isPlaying = true;
 
-                // Set audio properties
+                // Set audio properties for fast playback
                 audio.volume = options.volume !== undefined ? options.volume : 1;
                 audio.preload = 'auto';
+                // Start loading immediately
+                audio.load();
 
                 console.log('Audio element created, attempting to play...');
                 console.log('Audio properties:', {
@@ -168,9 +274,11 @@ class TTSService {
                     paused: audio.paused
                 });
 
-                // Wait for audio to be ready
+                // Wait for audio to be ready - start playing as soon as we have enough data
                 const tryPlay = () => {
-                    if (audio.readyState >= 2) { // HAVE_CURRENT_DATA
+                    // Use HAVE_FUTURE_DATA (3) or HAVE_CURRENT_DATA (2) for faster start
+                    // HAVE_ENOUGH_DATA (4) waits for full buffer, causing delays
+                    if (audio.readyState >= 2) { // HAVE_CURRENT_DATA - enough to start playing
                         console.log('Audio ready, attempting play...');
                         audio.play().then(() => {
                             console.log('✓ Audio play() promise resolved - audio should be playing');
@@ -192,8 +300,8 @@ class TTSService {
                             reject(error);
                         });
                     } else {
-                        console.log('Audio not ready yet, waiting... (readyState:', audio.readyState, ')');
-                        setTimeout(tryPlay, 100);
+                        // Check more frequently for faster response
+                        setTimeout(tryPlay, 10);
                     }
                 };
 
@@ -256,8 +364,7 @@ class TTSService {
                     console.log('Audio paused');
                 };
 
-                // Start loading
-                audio.load();
+                // Audio.load() is called earlier for faster start
             });
 
         } catch (error) {

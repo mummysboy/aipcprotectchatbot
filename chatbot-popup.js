@@ -28,6 +28,9 @@ class ChatbotPopup {
         this.isHangingUp = false;
         this.hasShownSalesPitch = false;
         this.currentSpeakingPromise = null; // Track current speaking promise
+        this.pendingAudio = null; // Preloaded next audio
+        this.batchSize = 3; // Number of messages to batch together
+        this.currentCaptions = []; // Track current batch captions for display
     }
 
     init() {
@@ -657,9 +660,23 @@ class ChatbotPopup {
             return;
         }
 
-        const message = this.speechQueue.shift();
-        if (message) {
-            this.speak(message);
+        // Batch multiple messages together for faster, smoother playback
+        const batch = [];
+        const captions = [];
+        const batchSize = Math.min(this.batchSize, this.speechQueue.length);
+        
+        for (let i = 0; i < batchSize; i++) {
+            if (this.speechQueue.length > 0) {
+                const msg = this.speechQueue.shift();
+                batch.push(msg);
+                captions.push(msg);
+            }
+        }
+        
+        if (batch.length > 0) {
+            // Combine messages with natural pauses
+            const combinedText = batch.join('. ');
+            this.speakBatch(combinedText, captions);
         }
     }
 
@@ -803,7 +820,7 @@ class ChatbotPopup {
             return;
         }
 
-        // Completely stop any ongoing speech
+        // Completely stop any ongoing speech IMMEDIATELY
         if (this.ttsService) {
             this.ttsService.stop();
         }
@@ -820,10 +837,21 @@ class ChatbotPopup {
         // Clear the speech queue to stop any pending messages
         this.speechQueue = [];
         
-        // Reset speaking state completely
+        // Reset speaking state completely - force immediate stop
         this.isSpeaking = false;
         this.currentSpeakingPromise = null;
         this.stopWaveform();
+        
+        // Force stop any pending audio immediately
+        if (this.ttsService && this.ttsService.currentAudio) {
+            const audio = this.ttsService.currentAudio;
+            audio.pause();
+            audio.currentTime = 0;
+            audio.onended = null;
+            audio.onerror = null;
+            this.ttsService.currentAudio = null;
+            this.ttsService.isPlaying = false;
+        }
         
         // Reset flags
         this.isHangingUp = true;
@@ -836,12 +864,13 @@ class ChatbotPopup {
             installBtn.style.display = 'none';
         }
 
-        // Small delay to ensure TTS has fully stopped before starting new speech
-        setTimeout(() => {
-            // Play warning pitch
+        // Immediately start hang up pitch after stopping current speech
+        // Use requestAnimationFrame to ensure stop() has been processed
+        requestAnimationFrame(() => {
+            // Play warning pitch immediately
             const hangUpPitch = this.getHangUpPitch();
             this.speakMessages(hangUpPitch);
-        }, 300);
+        });
     }
 
     endCall() {
@@ -870,9 +899,54 @@ class ChatbotPopup {
 
     updateCaption(text) {
         const captionElement = document.getElementById('captionText');
-        if (captionElement) {
-            captionElement.textContent = text;
+        if (!captionElement) return;
+
+        // If there's existing text, animate it out first
+        const existingLines = captionElement.querySelectorAll('.caption-line');
+        if (existingLines.length > 0) {
+            // Animate out existing lines
+            existingLines.forEach((line, index) => {
+                line.classList.add('rolling-out');
+                line.style.animationDelay = `${index * 0.05}s`;
+            });
+            
+            // After roll-out completes, roll in new text
+            setTimeout(() => {
+                this.rollInCaption(captionElement, text);
+            }, 350);
+        } else {
+            // No existing text, just roll in
+            this.rollInCaption(captionElement, text);
         }
+    }
+
+    rollInCaption(captionElement, text) {
+        // Split text into lines if it's long (for multi-line subtitles)
+        // Estimate ~12 words per line based on average word length
+        const words = text.split(' ');
+        const maxWordsPerLine = 12;
+        const lines = [];
+        
+        for (let i = 0; i < words.length; i += maxWordsPerLine) {
+            lines.push(words.slice(i, i + maxWordsPerLine).join(' '));
+        }
+        
+        // Create caption content structure
+        const captionContent = document.createElement('div');
+        captionContent.className = 'caption-content';
+        
+        lines.forEach((line, index) => {
+            const lineElement = document.createElement('span');
+            lineElement.className = 'caption-line rolling-in';
+            lineElement.textContent = line;
+            // Stagger animation for multi-line (subtle delay)
+            lineElement.style.animationDelay = `${index * 0.08}s`;
+            captionContent.appendChild(lineElement);
+        });
+        
+        // Clear and add new content
+        captionElement.innerHTML = '';
+        captionElement.appendChild(captionContent);
     }
 
     startWaveform() {
@@ -1042,7 +1116,7 @@ class ChatbotPopup {
         return div.innerHTML;
     }
 
-    async speak(text) {
+    async speakBatch(text, captions) {
         // Guard against multiple simultaneous calls
         if (this.isSpeaking) {
             console.warn('Already speaking, ignoring new speak request');
@@ -1051,7 +1125,7 @@ class ChatbotPopup {
 
         if (!this.ttsService || this.isMuted || !text) {
             // Fallback: just show text if TTS not available
-            this.updateCaption(text);
+            this.updateCaption(captions[0] || text);
             setTimeout(() => this.processSpeechQueue(), 2000);
             return;
         }
@@ -1067,7 +1141,14 @@ class ChatbotPopup {
         // Set speaking flag BEFORE starting to prevent race conditions
         this.isSpeaking = true;
         this.startWaveform();
-        this.updateCaption(text);
+        // Store captions for this batch
+        this.currentCaptions = captions;
+        // Show all captions combined (since they're spoken together)
+        const combinedCaption = captions.length > 1 ? captions.join(' ') : (captions[0] || text);
+        this.updateCaption(combinedCaption);
+
+        // Preload next batch while current is playing
+        this.preloadNextBatch();
 
         // Create a promise tracker for this specific speak call
         const speakId = Date.now();
@@ -1087,8 +1168,8 @@ class ChatbotPopup {
                 this.isSpeaking = false;
                 this.currentSpeakingPromise = null;
                 this.stopWaveform();
-                // Small delay before next message
-                setTimeout(() => this.processSpeechQueue(), 500);
+                // Process immediately for smooth transitions
+                this.processSpeechQueue();
             } else {
                 // This promise is stale, ignore it
                 console.log('Ignoring stale speak promise completion');
@@ -1100,8 +1181,38 @@ class ChatbotPopup {
                 this.isSpeaking = false;
                 this.currentSpeakingPromise = null;
                 this.stopWaveform();
-                setTimeout(() => this.processSpeechQueue(), 500);
+                // Minimal delay for error recovery
+                setTimeout(() => this.processSpeechQueue(), 50);
             }
+        }
+    }
+
+    async speak(text) {
+        // Single message - use batch method for consistency
+        await this.speakBatch(text, [text]);
+    }
+
+    preloadNextBatch() {
+        // Preload the next batch of messages while current is playing
+        if (this.speechQueue.length === 0 || !this.ttsService || this.ttsService.provider !== 'elevenlabs') {
+            return;
+        }
+
+        const nextBatch = [];
+        const batchSize = Math.min(this.batchSize, this.speechQueue.length);
+        
+        for (let i = 0; i < batchSize; i++) {
+            if (this.speechQueue[i]) {
+                nextBatch.push(this.speechQueue[i]);
+            }
+        }
+
+        if (nextBatch.length > 0) {
+            const combinedText = nextBatch.join('. ');
+            // Preload in background (don't await)
+            this.ttsService.preloadAudio(combinedText).catch(err => {
+                console.log('Preload failed (non-critical):', err);
+            });
         }
     }
 
