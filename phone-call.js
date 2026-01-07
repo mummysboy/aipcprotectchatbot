@@ -12,6 +12,7 @@ class PhoneCall {
         this.isHangingUp = false;
         this.recognitionActive = false; // Track if recognition is actively listening
         this.speechQueueTimeout = null; // Track pending speech queue timeouts
+        this._hangUpPitchStarted = false; // Prevent duplicate hang up pitch
         this.selectedVoice = options.voice || null; // Voice name or null for default
         this.voiceGender = options.voiceGender || null; // 'male' or 'female' to filter
         this.voiceLang = options.voiceLang || 'en-US'; // Language preference
@@ -680,6 +681,11 @@ class PhoneCall {
             return;
         }
 
+        // Prevent duplicate calls - if already processing hang up, ignore
+        if (this._hangUpPitchStarted) {
+            return;
+        }
+
         // Completely stop all speech and clear everything before starting new pitch
         this.stopSpeaking();
         
@@ -702,8 +708,9 @@ class PhoneCall {
 
         // Small delay to ensure all audio has stopped before starting new pitch
         setTimeout(() => {
-            // Double-check we're still in hang up flow and not speaking
-            if (this.isHangingUp && !this.isSpeaking) {
+            // Double-check we're still in hang up flow and not speaking, and pitch hasn't started
+            if (this.isHangingUp && !this.isSpeaking && !this._hangUpPitchStarted) {
+                this._hangUpPitchStarted = true;
                 // Play warning pitch
                 const hangUpPitch = this.getHangUpPitch();
                 this.speakMessages(hangUpPitch);
@@ -734,6 +741,7 @@ class PhoneCall {
         this.waitingForResponse = false;
         this.isHangingUp = false;
         this.recognitionActive = false;
+        this._hangUpPitchStarted = false; // Reset hang up pitch flag
         this.stopWaveform();
         this.hide();
     }

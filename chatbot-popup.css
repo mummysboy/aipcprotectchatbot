@@ -174,6 +174,15 @@
     justify-content: center;
 }
 
+.agent-icon-container .agent-logo {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    object-position: 15% center;
+    display: block;
+    transform: scale(1.0);
+}
+
 .agent-icon {
     width: 140px;
     height: 140px;
@@ -183,9 +192,24 @@
     align-items: center;
     justify-content: center;
     box-shadow: 0 0 30px rgba(102, 126, 234, 0.4);
-    animation: pulse 2s ease-in-out infinite;
     transition: all 0.3s ease;
     margin: 0 auto;
+    padding: 20px;
+    box-sizing: border-box;
+    overflow: hidden;
+}
+
+.agent-icon.speaking {
+    animation: pulseSpeaking 1.5s ease-in-out infinite;
+}
+
+.agent-logo {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    object-position: 15% center;
+    display: block;
+    transform: scale(1.0);
 }
 
 .agent-avatar {
@@ -199,11 +223,22 @@
     box-shadow: 0 0 40px rgba(102, 126, 234, 0.3);
     transition: all 0.3s ease;
     margin: 0 auto;
+    padding: 25px;
+    box-sizing: border-box;
+    overflow: hidden;
 }
 
 .agent-avatar.speaking {
-    box-shadow: 0 0 50px rgba(102, 126, 234, 0.6);
-    transform: scale(1.05);
+    animation: pulseSpeaking 1.5s ease-in-out infinite;
+}
+
+.agent-avatar .agent-logo {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    object-position: -1.5% center;
+    display: block;
+    transform: scale(1.0);
 }
 
 .agent-avatar-container {
@@ -211,59 +246,6 @@
     position: relative;
 }
 
-.audio-waveform {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 4px;
-    margin-top: 1rem;
-    height: 30px;
-    opacity: 0;
-    transition: opacity 0.3s ease;
-}
-
-.audio-waveform.active {
-    opacity: 1;
-}
-
-.wave-bar {
-    width: 4px;
-    height: 8px;
-    background: #667eea;
-    border-radius: 2px;
-    animation: waveAnimation 1.2s ease-in-out infinite;
-}
-
-.wave-bar:nth-child(1) {
-    animation-delay: 0s;
-}
-
-.wave-bar:nth-child(2) {
-    animation-delay: 0.2s;
-}
-
-.wave-bar:nth-child(3) {
-    animation-delay: 0.4s;
-}
-
-.wave-bar:nth-child(4) {
-    animation-delay: 0.6s;
-}
-
-.wave-bar:nth-child(5) {
-    animation-delay: 0.8s;
-}
-
-@keyframes waveAnimation {
-    0%, 100% {
-        height: 8px;
-        transform: scaleY(1);
-    }
-    50% {
-        height: 24px;
-        transform: scaleY(1.5);
-    }
-}
 
 .call-captions {
     margin-top: 2rem;
@@ -426,6 +408,17 @@
     }
     50% {
         box-shadow: 0 0 40px rgba(102, 126, 234, 0.6);
+    }
+}
+
+@keyframes pulseSpeaking {
+    0%, 100% {
+        transform: scale(1);
+        box-shadow: 0 0 30px rgba(102, 126, 234, 0.4);
+    }
+    50% {
+        transform: scale(1.08);
+        box-shadow: 0 0 50px rgba(102, 126, 234, 0.8);
     }
 }
 

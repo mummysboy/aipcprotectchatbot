@@ -27,6 +27,7 @@ class ChatbotPopup {
         // Phone call flow state
         this.speechQueue = [];
         this.waitingForResponse = false;
+        this.waitingForDownloadResponse = false; // Track if we're waiting for yes/no to download pitch
         this.isHangingUp = false;
         this.hasShownSalesPitch = false;
         this.currentSpeakingPromise = null; // Track current speaking promise
@@ -54,6 +55,8 @@ class ChatbotPopup {
         this._lastInterimTranscript = ''; // Store latest interim transcript for barge-in timeout
         this._recentTTSText = []; // Track recent TTS text to filter echo (last 3 messages)
         this._ttsStopTime = null; // Track when TTS stopped to ignore recognition for a short period
+        this._lastProcessedTranscript = null; // Track last processed transcript to prevent duplicates
+        this._lastProcessedTime = 0; // Timestamp of last processed transcript
     }
 
     init() {
@@ -98,10 +101,42 @@ class ChatbotPopup {
         this.ttsService.setOnError((error) => {
             console.error('TTS error:', error);
             this.isSpeaking = false;
+            this.updateSpeakingState();
             this.stopWaveform();
             // Continue processing queue even on error
             setTimeout(() => this.processSpeechQueue(), 500);
         });
+        
+        // Preload common phrases for faster response time
+        this.preloadCommonPhrases();
+    }
+    
+    preloadCommonPhrases() {
+        // Preload common phrases that are likely to be used
+        // This reduces latency when these phrases need to be spoken
+        if (!this.ttsService || this.ttsProvider !== 'elevenlabs') {
+            return; // Only preload for ElevenLabs (browser TTS is instant)
+        }
+        
+        const commonPhrases = [
+            "Hi, this is",
+            "I'm reaching out because",
+            "Would you like me to take care of that for you now?",
+            "Yes or No",
+            "I understand your hesitation",
+            "Great! Click the Install Now button",
+            "I'm glad you're staying"
+        ];
+        
+        // Preload in background (don't await)
+        setTimeout(() => {
+            commonPhrases.forEach(phrase => {
+                this.ttsService.preloadAudio(phrase).catch(err => {
+                    // Ignore preload errors - it's non-critical
+                    console.log('Preload failed for phrase (non-critical):', phrase);
+                });
+            });
+        }, 1000); // Wait a bit after initialization
     }
 
     initVoice() {
@@ -140,42 +175,54 @@ class ChatbotPopup {
                 // Use final transcript if available, otherwise use interim (for barge-in cases)
                 const transcriptToUse = finalTranscript || interimTranscript;
                 
-                // Ignore recognition if TTS just stopped (likely echo) - wait 800ms after TTS stops
-                // This gives time for echo to die down
-                if (this._ttsStopTime && (Date.now() - this._ttsStopTime) < 800) {
-                    console.log('Ignoring recognition result (too soon after TTS stop, likely echo):', transcriptToUse);
-                    return;
-                }
-                
-                // Check if transcript matches recent TTS text (echo detection)
-                if (transcriptToUse && this._recentTTSText.length > 0) {
-                    const transcriptLower = transcriptToUse.toLowerCase().replace(/[^\w\s]/g, '');
-                    for (const ttsText of this._recentTTSText) {
-                        const ttsLower = ttsText.toLowerCase().replace(/[^\w\s]/g, '');
-                        // Check if transcript is similar to TTS (likely echo)
-                        // Compare first 60 chars or if significant overlap
-                        const transcriptStart = transcriptLower.substring(0, 60);
-                        const ttsStart = ttsLower.substring(0, 60);
-                        // Check for significant overlap (at least 30 chars match)
-                        if (transcriptStart.length > 30 && ttsStart.length > 30) {
-                            // Check if first 30 chars match (very likely echo)
-                            if (transcriptStart.substring(0, 30) === ttsStart.substring(0, 30)) {
-                                console.log('Ignoring recognition result (matches recent TTS start, likely echo):', transcriptToUse);
-                                return;
-                            }
-                            // Check if transcript contains a significant portion of TTS
-                            const overlapLength = Math.min(40, Math.min(transcriptStart.length, ttsStart.length));
-                            if (overlapLength > 30 && transcriptStart.substring(0, overlapLength) === ttsStart.substring(0, overlapLength)) {
-                                console.log('Ignoring recognition result (significant overlap with TTS, likely echo):', transcriptToUse);
-                                return;
+                // During barge-in, skip echo detection - user is actively speaking
+                // Only do echo detection if NOT during barge-in
+                if (!this._bargeInDetected) {
+                    // Ignore recognition if TTS just stopped (likely echo) - wait 800ms after TTS stops
+                    // This gives time for echo to die down
+                    if (this._ttsStopTime && (Date.now() - this._ttsStopTime) < 800) {
+                        console.log('Ignoring recognition result (too soon after TTS stop, likely echo):', transcriptToUse);
+                        return;
+                    }
+                } else {
+                    // During barge-in, use shorter echo delay (200ms instead of 800ms)
+                    // This allows us to capture user speech faster
+                    if (this._ttsStopTime && (Date.now() - this._ttsStopTime) < 200) {
+                        console.log('Barge-in: Ignoring very early recognition (likely echo):', transcriptToUse);
+                        return;
+                    }
+                    
+                    // Check if transcript matches recent TTS text (echo detection)
+                    if (transcriptToUse && this._recentTTSText.length > 0) {
+                        const transcriptLower = transcriptToUse.toLowerCase().replace(/[^\w\s]/g, '');
+                        for (const ttsText of this._recentTTSText) {
+                            const ttsLower = ttsText.toLowerCase().replace(/[^\w\s]/g, '');
+                            // Check if transcript is similar to TTS (likely echo)
+                            // Compare first 60 chars or if significant overlap
+                            const transcriptStart = transcriptLower.substring(0, 60);
+                            const ttsStart = ttsLower.substring(0, 60);
+                            // Check for significant overlap (at least 30 chars match)
+                            if (transcriptStart.length > 30 && ttsStart.length > 30) {
+                                // Check if first 30 chars match (very likely echo)
+                                if (transcriptStart.substring(0, 30) === ttsStart.substring(0, 30)) {
+                                    console.log('Ignoring recognition result (matches recent TTS start, likely echo):', transcriptToUse);
+                                    return;
+                                }
+                                // Check if transcript contains a significant portion of TTS
+                                const overlapLength = Math.min(40, Math.min(transcriptStart.length, ttsStart.length));
+                                if (overlapLength > 30 && transcriptStart.substring(0, overlapLength) === ttsStart.substring(0, overlapLength)) {
+                                    console.log('Ignoring recognition result (significant overlap with TTS, likely echo):', transcriptToUse);
+                                    return;
+                                }
                             }
                         }
                     }
                 }
                 
-                // Log all recognition results for debugging
-                if (transcriptToUse) {
-                    console.log('Recognition result:', {
+                // Log recognition results only when processing (reduce spam)
+                // Only log if we're actually going to process it or if it's a final result
+                if (transcriptToUse && (finalTranscript || this._bargeInDetected)) {
+                    console.log('Recognition result (processing):', {
                         final: finalTranscript,
                         interim: interimTranscript,
                         used: transcriptToUse,
@@ -199,32 +246,124 @@ class ChatbotPopup {
                     if (this._bargeInDetected) {
                         // During barge-in, prefer final but accept interim if that's all we have
                         if (finalTranscript) {
-                            // We have final - process it
-                            console.log('Processing final transcript during barge-in:', finalTranscript);
+                            // We have final - process it immediately
+                            console.log('✅ Processing final transcript during barge-in:', finalTranscript);
+                            // Clear barge-in flag and process
+                            const transcriptToProcess = finalTranscript;
+                            this._bargeInDetected = false;
+                            // Clear any pending timeout
+                            if (this._bargeInInterimTimeout) {
+                                clearTimeout(this._bargeInInterimTimeout);
+                                this._bargeInInterimTimeout = null;
+                            }
+                            // Clear TTS stop time to allow future recognition
+                            this._ttsStopTime = null;
+                            if (this.waitingForResponse) {
+                                console.log('Calling handleUserResponse with:', transcriptToProcess);
+                                this.handleUserResponse(transcriptToProcess);
+                            } else {
+                                console.log('Calling handleVoiceInput with:', transcriptToProcess);
+                                this.handleVoiceInput(transcriptToProcess);
+                            }
+                            return;
                         } else if (interimTranscript) {
                             // Only interim - wait a bit more for final (but not too long)
-                            console.log('Waiting for final transcript during barge-in, interim:', interimTranscript);
+                            // Filter out very short fragments (likely TTS echo or noise)
+                            const cleanInterim = interimTranscript.trim();
+                            if (cleanInterim.length < 3) {
+                                console.log('⏳ Interim transcript too short, waiting for more:', cleanInterim);
+                                return;
+                            }
+                            
+                            // Check if interim contains TTS echo
+                            let isEcho = false;
+                            if (this._recentTTSText.length > 0) {
+                                const interimLower = cleanInterim.toLowerCase().replace(/[^\w\s]/g, '');
+                                for (const ttsText of this._recentTTSText) {
+                                    const ttsLower = ttsText.toLowerCase().replace(/[^\w\s]/g, '');
+                                    // Check if interim starts with TTS text (echo)
+                                    if (interimLower.startsWith(ttsLower.substring(0, Math.min(20, ttsLower.length)))) {
+                                        console.log('⏳ Interim transcript appears to be TTS echo, waiting for user speech:', cleanInterim);
+                                        isEcho = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            
+                            if (isEcho) {
+                                return;
+                            }
+                            
+                            console.log('⏳ Waiting for final transcript during barge-in, interim:', cleanInterim);
                             // Set a timeout to process interim if final doesn't come
-                            if (!this._bargeInInterimTimeout) {
-                                const interimToProcess = interimTranscript; // Capture current value
-                                this._bargeInInterimTimeout = setTimeout(() => {
-                                    // Use the stored latest interim transcript
-                                    const transcriptToProcess = this._lastInterimTranscript || interimToProcess;
-                                    if (transcriptToProcess && this._bargeInDetected) {
-                                        console.log('Processing interim transcript after timeout:', transcriptToProcess);
-                                        this._bargeInInterimTimeout = null;
-                                        if (this.waitingForResponse) {
-                                            this.handleUserResponse(transcriptToProcess);
-                                        } else {
-                                            this.handleVoiceInput(transcriptToProcess);
+                            // Clear any existing timeout and set a new one with latest transcript
+                            if (this._bargeInInterimTimeout) {
+                                clearTimeout(this._bargeInInterimTimeout);
+                            }
+                            
+                            this._bargeInInterimTimeout = setTimeout(() => {
+                                // Use the stored latest interim transcript
+                                const transcriptToProcess = this._lastInterimTranscript || cleanInterim;
+                                // Only process if it's substantial (not a fragment) and barge-in still active
+                                if (transcriptToProcess && transcriptToProcess.trim().length >= 3 && this._bargeInDetected) {
+                                    // Final check for echo (less aggressive during barge-in)
+                                    const finalCheck = transcriptToProcess.trim().toLowerCase();
+                                    let isStillEcho = false;
+                                    // Only check if transcript clearly matches TTS (not just partial)
+                                    for (const ttsText of this._recentTTSText) {
+                                        const ttsLower = ttsText.toLowerCase();
+                                        // Check if transcript starts with significant portion of TTS (20+ chars)
+                                        if (finalCheck.length >= 20 && ttsLower.length >= 20 && 
+                                            finalCheck.startsWith(ttsLower.substring(0, 20))) {
+                                            isStillEcho = true;
+                                            break;
                                         }
                                     }
-                                }, 1500); // Wait 1.5s for final, then use interim
-                            }
+                                    
+                                    if (!isStillEcho) {
+                                        console.log('✅ Processing interim transcript after timeout:', transcriptToProcess);
+                                        this._bargeInInterimTimeout = null;
+                                        const processedTranscript = transcriptToProcess;
+                                        this._bargeInDetected = false; // Clear flag
+                                        this._ttsStopTime = null; // Clear TTS stop time
+                                        if (this.waitingForResponse) {
+                                            console.log('Calling handleUserResponse with interim:', processedTranscript);
+                                            this.handleUserResponse(processedTranscript);
+                                        } else {
+                                            console.log('Calling handleVoiceInput with interim:', processedTranscript);
+                                            this.handleVoiceInput(processedTranscript);
+                                        }
+                                    } else {
+                                        console.log('⚠️ Interim transcript still appears to be echo, waiting more...');
+                                        // Extend timeout to wait for more user speech
+                                        this._bargeInInterimTimeout = setTimeout(() => {
+                                            // Try one more time with latest interim
+                                            const latestTranscript = this._lastInterimTranscript;
+                                            if (latestTranscript && latestTranscript.trim().length >= 3 && this._bargeInDetected) {
+                                                console.log('✅ Retry: Processing latest interim transcript:', latestTranscript);
+                                                this._bargeInDetected = false;
+                                                this._ttsStopTime = null;
+                                                if (this.waitingForResponse) {
+                                                    this.handleUserResponse(latestTranscript);
+                                                } else {
+                                                    this.handleVoiceInput(latestTranscript);
+                                                }
+                                            }
+                                        }, 2000); // Wait 2 more seconds
+                                    }
+                                } else {
+                                    console.log('⚠️ Timeout expired but no valid transcript or barge-in flag cleared');
+                                }
+                            }, 1200); // Wait 1.2 seconds for final, then process interim (reduced for faster response)
+                            return;
+                        } else {
+                            // No transcript yet during barge-in - wait for it
+                            console.log('⏳ Barge-in detected but no transcript yet, waiting...');
                             return;
                         }
                     }
                     
+                    // Normal processing (not during barge-in)
                     // Process the transcript
                     if (this.waitingForResponse) {
                         this.handleUserResponse(transcriptToUse);
@@ -246,11 +385,13 @@ class ChatbotPopup {
             };
 
             this.recognition.onerror = (event) => {
-                console.error('Speech recognition error:', event.error);
-                // Don't stop on 'no-speech' errors during continuous recognition
+                // Don't log 'no-speech' errors - they're expected during continuous recognition
                 if (event.error === 'no-speech') {
                     return;
                 }
+                
+                // Log other errors
+                console.error('Speech recognition error:', event.error);
                 
                 let errorMessage = 'Voice input error. ';
                 
@@ -388,27 +529,7 @@ class ChatbotPopup {
                 <div class="call-content chatbot-popup-content" id="callView">
                     <div class="agent-avatar-container agent-icon-container">
                         <div class="agent-avatar agent-icon" id="agentAvatar">
-                            <svg width="100" height="100" viewBox="0 0 100 100" fill="none">
-                                <path d="M50 10 L20 25 L20 50 C20 70 50 85 50 85 C50 85 80 70 80 50 L80 25 Z" fill="url(#shieldGradient)" opacity="0.3"/>
-                                <circle cx="40" cy="45" r="4" fill="white"/>
-                                <circle cx="60" cy="45" r="4" fill="white"/>
-                                <circle cx="50" cy="60" r="3" fill="white"/>
-                                <circle cx="35" cy="55" r="2" fill="white"/>
-                                <circle cx="65" cy="55" r="2" fill="white"/>
-                                <defs>
-                                    <linearGradient id="shieldGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-                                        <stop offset="0%" style="stop-color:#667eea;stop-opacity:1" />
-                                        <stop offset="100%" style="stop-color:#764ba2;stop-opacity:1" />
-                                    </linearGradient>
-                                </defs>
-                            </svg>
-                        </div>
-                        <div class="audio-waveform" id="audioWaveform">
-                            <div class="wave-bar"></div>
-                            <div class="wave-bar"></div>
-                            <div class="wave-bar"></div>
-                            <div class="wave-bar"></div>
-                            <div class="wave-bar"></div>
+                            <img src="https://aipcsafe.com/images/logo-2.svg" alt="AI PC Protect Logo" class="agent-logo" />
                         </div>
                     </div>
 
@@ -506,15 +627,24 @@ class ChatbotPopup {
         const installNowBtn = document.getElementById('installNowBtn');
 
         if (closeBtn) {
-            closeBtn.addEventListener('click', () => this.handleHangUpAttempt());
+            closeBtn.addEventListener('click', (e) => {
+                e.stopPropagation(); // Prevent event bubbling to overlay handler
+                this.handleHangUpAttempt();
+            });
         }
 
         if (hangupBtn) {
-            hangupBtn.addEventListener('click', () => this.handleHangUpAttempt());
+            hangupBtn.addEventListener('click', (e) => {
+                e.stopPropagation(); // Prevent event bubbling
+                this.handleHangUpAttempt();
+            });
         }
 
         if (declineBtn) {
-            declineBtn.addEventListener('click', () => this.handleHangUpAttempt());
+            declineBtn.addEventListener('click', (e) => {
+                e.stopPropagation(); // Prevent event bubbling
+                this.handleHangUpAttempt();
+            });
         }
 
         if (acceptBtn) {
@@ -794,6 +924,7 @@ class ChatbotPopup {
         this.hasShownSalesPitch = false;
         this.isListening = false;
         this.isSpeaking = false;
+        this.updateSpeakingState();
         this.currentSpeakingPromise = null;
         this.speechQueue = [];
         
@@ -829,6 +960,7 @@ class ChatbotPopup {
 
         if (this.speechQueue.length === 0) {
             this.isSpeaking = false;
+            this.updateSpeakingState();
             this.stopWaveform();
             
             // Check if we're in hang up flow
@@ -849,28 +981,25 @@ class ChatbotPopup {
             return;
         }
 
-        // Batch multiple messages together for faster, smoother playback
-        const batch = [];
-        const captions = [];
-        const batchSize = Math.min(this.batchSize, this.speechQueue.length);
+        // OPTIMIZATION: Speak first message immediately for faster response time
+        // Then batch remaining messages for smoother playback
+        const firstMessage = this.speechQueue.shift();
         
-        for (let i = 0; i < batchSize; i++) {
-            if (this.speechQueue.length > 0) {
-                const msg = this.speechQueue.shift();
-                batch.push(msg);
-                captions.push(msg);
-            }
-        }
-        
-        if (batch.length > 0) {
-            // Combine messages with natural pauses
-            const combinedText = batch.join('. ');
+        if (firstMessage) {
             // Track TTS text to filter echo (keep last 3)
-            this._recentTTSText.push(combinedText);
+            this._recentTTSText.push(firstMessage);
             if (this._recentTTSText.length > 3) {
                 this._recentTTSText.shift();
             }
-            this.speakBatch(combinedText, captions);
+            
+            // Speak first message immediately
+            this.speakBatch(firstMessage, [firstMessage]);
+            
+            // Preload next message while first message is playing (for faster transitions)
+            // This is called again in speakBatch, but calling here ensures it happens immediately
+            if (this.speechQueue.length > 0) {
+                this.preloadNextBatch();
+            }
         }
     }
 
@@ -1010,14 +1139,23 @@ class ChatbotPopup {
                     }
                 }, waitTime);
             } else {
-                // Has content but doesn't match yes/no - treat as regular message
-                console.log('Non-yes/no response, treating as regular input:', response);
+                // Has content but doesn't match yes/no - treat as regular message/question
+                console.log('Non-yes/no response, treating as question/input:', response);
                 this._bargeInDetected = false; // Clear flag
                 
-                // Clear waitingForResponse flag since we're handling it as a regular message
-                this.waitingForResponse = false;
+                // Hide response prompt since we're processing a question
+                this.hideResponsePrompt();
+                
+                // Switch to chat view to show the conversation
+                const callView = document.getElementById('callView');
+                const chatView = document.getElementById('chatView');
+                if (callView && chatView) {
+                    callView.style.display = 'none';
+                    chatView.style.display = 'block';
+                }
                 
                 // Process as regular voice input (send to ChatGPT)
+                // This will handle the question and get a response
                 this.handleVoiceInput(transcript); // Use original transcript, not normalized response
             }
         }
@@ -1046,6 +1184,12 @@ class ChatbotPopup {
             return;
         }
 
+        // Prevent duplicate calls - if already processing hang up, ignore
+        if (this._processingHangUp) {
+            return;
+        }
+        this._processingHangUp = true;
+
         // Completely stop any ongoing speech IMMEDIATELY
         if (this.ttsService) {
             this.ttsService.stop();
@@ -1068,6 +1212,7 @@ class ChatbotPopup {
         
         // Reset speaking state completely - force immediate stop
         this.isSpeaking = false;
+        this.updateSpeakingState();
         this.currentSpeakingPromise = null;
         this.stopWaveform();
         
@@ -1096,9 +1241,18 @@ class ChatbotPopup {
         // Immediately start hang up pitch after stopping current speech
         // Use requestAnimationFrame to ensure stop() has been processed
         requestAnimationFrame(() => {
+            // Double-check that we haven't already started (extra safety for race conditions)
+            if (this._hangUpPitchStarted) {
+                this._processingHangUp = false;
+                return;
+            }
+            this._hangUpPitchStarted = true;
             // Play warning pitch immediately
             const hangUpPitch = this.getHangUpPitch();
             this.speakMessages(hangUpPitch);
+            // Clear the processing flag after scheduling the pitch
+            // Note: Keep _hangUpPitchStarted = true to prevent duplicate calls
+            this._processingHangUp = false;
         });
     }
 
@@ -1121,10 +1275,13 @@ class ChatbotPopup {
         this.stopMicMonitor();
         
         this.isSpeaking = false;
+        this.updateSpeakingState();
         this.speechQueue = [];
         this.waitingForResponse = false;
         this.isHangingUp = false;
         this.hasShownSalesPitch = false;
+        this._processingHangUp = false; // Reset processing flag
+        this._hangUpPitchStarted = false; // Reset hang up pitch flag
         this.stopWaveform();
         this.hide();
     }
@@ -1181,26 +1338,43 @@ class ChatbotPopup {
         captionElement.appendChild(captionContent);
     }
 
-    startWaveform() {
-        const waveform = document.getElementById('audioWaveform');
+    updateSpeakingState() {
         const avatar = document.getElementById('agentAvatar');
-        if (waveform) {
-            waveform.classList.add('active');
-        }
-        if (avatar) {
-            avatar.classList.add('speaking');
+        const agentIcon = document.querySelector('.agent-icon');
+        
+        if (this.isSpeaking) {
+            if (avatar) {
+                avatar.classList.add('speaking');
+            }
+            if (agentIcon) {
+                agentIcon.classList.add('speaking');
+            }
+        } else {
+            if (avatar) {
+                avatar.classList.remove('speaking');
+            }
+            if (agentIcon) {
+                agentIcon.classList.remove('speaking');
+            }
         }
     }
 
-    stopWaveform() {
-        const waveform = document.getElementById('audioWaveform');
+    startWaveform() {
         const avatar = document.getElementById('agentAvatar');
-        if (waveform) {
-            waveform.classList.remove('active');
+        if (avatar) {
+            avatar.classList.add('speaking');
         }
+        // Also update the initial popup icon
+        this.updateSpeakingState();
+    }
+
+    stopWaveform() {
+        const avatar = document.getElementById('agentAvatar');
         if (avatar) {
             avatar.classList.remove('speaking');
         }
+        // Also update the initial popup icon
+        this.updateSpeakingState();
     }
 
     toggleSpeaker() {
@@ -1226,8 +1400,71 @@ class ChatbotPopup {
         // Add user message to chat
         this.addMessageToChat(userMessage, 'user');
 
+        // Check if user is responding to download pitch
+        const lowerMessage = userMessage.toLowerCase().trim();
+        const isYesResponse = /^(yes|yeah|yea|yep|sure|ok|okay|definitely|absolutely|please|y)$/i.test(lowerMessage) ||
+                              lowerMessage.includes('yes') || lowerMessage.includes('sure') || lowerMessage.includes('walk me through');
+        const isNoResponse = /^(no|nope|nah|not now|later|maybe later|n)$/i.test(lowerMessage) ||
+                             (lowerMessage.includes('no') && !lowerMessage.includes('know'));
+
+        // Handle yes response - show download button immediately
+        if (isYesResponse && this.waitingForDownloadResponse) {
+            this.waitingForDownloadResponse = false;
+            // Ensure chat view is visible
+            const callView = document.getElementById('callView');
+            const chatView = document.getElementById('chatView');
+            if (callView && chatView) {
+                callView.style.display = 'none';
+                chatView.style.display = 'block';
+            }
+            const downloadMsg = "Great! Begin by pressing the Download button below to get protected.";
+            this.addMessageToChat(downloadMsg, 'agent');
+            this.showInstallButton();
+            this.speak(downloadMsg).catch(err => console.error('TTS error:', err));
+            return;
+        }
+
+        // Handle no response - give counter-pitch
+        if (isNoResponse && this.waitingForDownloadResponse) {
+            this.waitingForDownloadResponse = false;
+            // Ensure chat view is visible
+            const callView = document.getElementById('callView');
+            const chatView = document.getElementById('chatView');
+            if (callView && chatView) {
+                callView.style.display = 'none';
+                chatView.style.display = 'block';
+            }
+            const counterPitch = "I understand, but your PC is vulnerable to hackers, malware, and identity theft right now. AI PC Protect provides 24/7 real-time protection. Are you sure you don't want me to walk you through the quick download?";
+            this.addMessageToChat(counterPitch, 'agent');
+            this.waitingForDownloadResponse = true; // Keep waiting for their response
+            this.speak(counterPitch).catch(err => console.error('TTS error:', err));
+            return;
+        }
+
         // Show typing indicator
         const typingId = this.showTypingIndicator();
+
+        // Show automatic response immediately to reduce perceived lag
+        const automaticResponses = [
+            "One moment...",
+            "I'm glad you asked!",
+            "Just a second...",
+            "Let me think...",
+            "Great question!",
+            "On it!",
+            "I'm on it!",
+            "Good point!",
+            "Got it!",
+            "Sure thing!"
+        ];
+        const randomResponse = automaticResponses[Math.floor(Math.random() * automaticResponses.length)];
+        let automaticResponseElement = null;
+        
+        // Small delay to show typing indicator, then show automatic response
+        setTimeout(() => {
+            this.removeTypingIndicator(typingId);
+            automaticResponseElement = this.addMessageToChat(randomResponse, 'agent');
+        }, 300);
 
         try {
             // Ensure ChatGPT service is initialized
@@ -1235,25 +1472,177 @@ class ChatbotPopup {
                 this.chatGPTService = new ChatGPTService();
             }
             
-            // Send to ChatGPT
-            console.log('Calling ChatGPT service...');
-            const response = await this.chatGPTService.sendMessage(userMessage, this.contextData);
-            console.log('Received response:', response);
+            // Track streaming response
+            let fullResponse = '';
+            let messageElement = null;
+            let firstSentenceComplete = false;
+            let firstSentenceText = '';
+            let sentenceBuffer = '';
+            let firstSentencePromise = null; // Track the first sentence speaking promise
             
-            // Remove typing indicator
-            this.removeTypingIndicator(typingId);
+            // Helper to detect sentence boundaries
+            const isSentenceEnd = (text) => {
+                return /[.!?]\s*$/.test(text.trim());
+            };
             
-            // Add response to chat
-            this.addMessageToChat(response, 'agent');
+            // Send to ChatGPT with streaming
+            console.log('Calling ChatGPT service with streaming...');
+            const response = await this.chatGPTService.sendMessage(
+                userMessage, 
+                this.contextData,
+                // onChunk callback - called as text streams in
+                (chunk, fullText) => {
+                    fullResponse = fullText;
+                    
+                    // Update chat message in real-time
+                    if (!messageElement) {
+                        // Remove automatic response when real response starts
+                        if (automaticResponseElement) {
+                            automaticResponseElement.remove();
+                            automaticResponseElement = null;
+                        }
+                        messageElement = this.addMessageToChat('', 'agent');
+                    }
+                    
+                    // Update message content
+                    const contentDiv = messageElement?.querySelector('.message-content p');
+                    if (contentDiv) {
+                        contentDiv.textContent = fullText;
+                    }
+                    
+                    // Check if we have a complete first sentence
+                    if (!firstSentenceComplete) {
+                        sentenceBuffer += chunk;
+                        
+                        // Look for sentence ending
+                        if (isSentenceEnd(sentenceBuffer)) {
+                            firstSentenceComplete = true;
+                            firstSentenceText = sentenceBuffer.trim();
+                            
+                            // Start TTS immediately with first sentence
+                            console.log('First sentence complete, starting TTS:', firstSentenceText);
+                            this.waitingForResponse = true;
+                            
+                            // Start speaking first sentence and track the promise
+                            firstSentencePromise = this.speak(firstSentenceText).catch(err => {
+                                // TTS stop errors are expected during interruption - don't log as error
+                                if (err.message && !err.message.includes('TTS stopped')) {
+                                    console.error('Error speaking first sentence:', err);
+                                }
+                            });
+                        }
+                    }
+                }
+            );
             
-            // Speak the response and wait for user response after
-            console.log('Speaking response...');
-            this.waitingForResponse = true; // Keep call open after speaking
-            await this.speak(response);
+            console.log('Received full response:', response);
+            console.log('Response length:', response?.length || 0);
+            
+            // Check if response is empty
+            if (!response || response.trim().length === 0) {
+                console.error('Empty response from ChatGPT - this might be a streaming issue');
+                // Remove automatic response if it exists
+                if (automaticResponseElement) {
+                    automaticResponseElement.remove();
+                    automaticResponseElement = null;
+                }
+                this.removeTypingIndicator(typingId);
+                this.addMessageToChat(
+                    'Sorry, I received an empty response. Please try asking your question again.',
+                    'agent',
+                    true
+                );
+                return;
+            }
+            
+            // If we didn't get a first sentence yet, speak the full response
+            if (!firstSentenceComplete && response) {
+                // Remove automatic response if it exists
+                if (automaticResponseElement) {
+                    automaticResponseElement.remove();
+                    automaticResponseElement = null;
+                }
+                this.removeTypingIndicator(typingId);
+                if (!messageElement) {
+                    messageElement = this.addMessageToChat(response, 'agent');
+                } else {
+                    // Update final message
+                    const contentDiv = messageElement?.querySelector('.message-content p');
+                    if (contentDiv) {
+                        contentDiv.textContent = response;
+                    }
+                }
+                
+                // Speak the full response
+                console.log('Speaking full response...');
+                this.waitingForResponse = true;
+                await this.speak(response);
+            } else if (firstSentenceComplete && response) {
+                // We already started speaking first sentence, now handle the rest
+                // Remove automatic response if it exists
+                if (automaticResponseElement) {
+                    automaticResponseElement.remove();
+                    automaticResponseElement = null;
+                }
+                this.removeTypingIndicator(typingId);
+                
+                // Check if there's more text after the first sentence
+                if (response.length > firstSentenceText.length) {
+                    const remainingText = response.substring(firstSentenceText.length).trim();
+                    if (remainingText) {
+                        // Wait for first sentence to finish before speaking the rest
+                        console.log('Waiting for first sentence to finish, then speaking remaining text:', remainingText);
+                        try {
+                            // Wait for the first sentence to complete
+                            if (firstSentencePromise) {
+                                await firstSentencePromise;
+                            }
+                            // Small delay to ensure smooth transition
+                            await new Promise(resolve => setTimeout(resolve, 200));
+                            
+                            // Now speak the remaining text
+                            console.log('Speaking remaining text after first sentence completed');
+                            await this.speak(remainingText);
+                        } catch (err) {
+                            // TTS stop errors are expected during interruption - don't log as error
+                            if (err.message && !err.message.includes('TTS stopped')) {
+                                console.error('Error speaking remaining text:', err);
+                            }
+                        }
+                    } else {
+                        // No remaining text, just wait for first sentence to finish
+                        if (firstSentencePromise) {
+                            try {
+                                await firstSentencePromise;
+                            } catch (err) {
+                                // Ignore errors
+                            }
+                        }
+                    }
+                } else {
+                    // Response is same as first sentence, just wait for it to finish
+                    if (firstSentencePromise) {
+                        try {
+                            await firstSentencePromise;
+                        } catch (err) {
+                            // Ignore errors
+                        }
+                    }
+                }
+            }
+            
             // After speaking, show response prompt to continue conversation
             this.showResponsePrompt();
+            
+            // Set flag to wait for yes/no response to download pitch
+            this.waitingForDownloadResponse = true;
         } catch (error) {
             console.error('Error sending message:', error);
+            // Remove automatic response if it exists
+            if (automaticResponseElement) {
+                automaticResponseElement.remove();
+                automaticResponseElement = null;
+            }
             // Remove typing indicator
             this.removeTypingIndicator(typingId);
             
@@ -1303,6 +1692,7 @@ class ChatbotPopup {
 
         chatMessages.appendChild(messageDiv);
         chatMessages.scrollTop = chatMessages.scrollHeight;
+        return messageDiv;
     }
 
     showTypingIndicator() {
@@ -1392,6 +1782,7 @@ class ChatbotPopup {
 
         // Set speaking flag BEFORE starting to prevent race conditions
         this.isSpeaking = true;
+        this.updateSpeakingState();
         this.startWaveform();
         // Store captions for this batch
         this.currentCaptions = captions;
@@ -1418,6 +1809,7 @@ class ChatbotPopup {
             // (prevents processing if we've already moved on to a new message)
             if (this.isSpeaking && this.currentSpeakingPromise === speakId) {
                 this.isSpeaking = false;
+                this.updateSpeakingState();
                 this.currentSpeakingPromise = null;
                 this.stopWaveform();
                 // Stop VAD mic monitor (no longer needed)
@@ -1433,10 +1825,18 @@ class ChatbotPopup {
                 console.log('Ignoring stale speak promise completion');
             }
         } catch (error) {
-            console.error('Error speaking:', error);
+            // Handle errors gracefully - TTS stop errors are expected during interruption
+            if (error.message && error.message.includes('TTS stopped')) {
+                // This is expected when user interrupts - don't log as error
+                console.log('TTS stopped (interruption expected)');
+            } else {
+                console.error('Error speaking:', error);
+            }
+            
             // Only process if this is still the current promise
             if (this.currentSpeakingPromise === speakId) {
                 this.isSpeaking = false;
+                this.updateSpeakingState();
                 this.currentSpeakingPromise = null;
                 this.stopWaveform();
                 // Stop VAD mic monitor
@@ -1457,26 +1857,29 @@ class ChatbotPopup {
     }
 
     preloadNextBatch() {
-        // Preload the next batch of messages while current is playing
+        // Preload the next message(s) while current is playing for faster transitions
         if (this.speechQueue.length === 0 || !this.ttsService || this.ttsService.provider !== 'elevenlabs') {
             return;
         }
 
-        const nextBatch = [];
-        const batchSize = Math.min(this.batchSize, this.speechQueue.length);
-        
-        for (let i = 0; i < batchSize; i++) {
-            if (this.speechQueue[i]) {
-                nextBatch.push(this.speechQueue[i]);
-            }
-        }
-
-        if (nextBatch.length > 0) {
-            const combinedText = nextBatch.join('. ');
+        // Preload the next message immediately (optimized for immediate-first-message approach)
+        const nextMessage = this.speechQueue[0];
+        if (nextMessage) {
             // Preload in background (don't await)
-            this.ttsService.preloadAudio(combinedText).catch(err => {
+            this.ttsService.preloadAudio(nextMessage).catch(err => {
                 console.log('Preload failed (non-critical):', err);
             });
+        }
+        
+        // Also preload a few more if available for smoother playback
+        if (this.speechQueue.length > 1) {
+            const nextFew = this.speechQueue.slice(1, Math.min(3, this.speechQueue.length));
+            if (nextFew.length > 0) {
+                const combinedText = nextFew.join('. ');
+                this.ttsService.preloadAudio(combinedText).catch(err => {
+                    console.log('Preload failed (non-critical):', err);
+                });
+            }
         }
     }
 
@@ -1486,6 +1889,7 @@ class ChatbotPopup {
         if (this.isMuted && this.ttsService) {
             this.ttsService.stop();
             this.isSpeaking = false;
+            this.updateSpeakingState();
             this.stopWaveform();
         }
 
@@ -1712,9 +2116,16 @@ class ChatbotPopup {
     stopSpeaking() {
         // Stop TTS immediately when user interrupts
         if (this.ttsService) {
-            this.ttsService.stop();
+            try {
+                this.ttsService.stop();
+            } catch (error) {
+                // TTS stop may reject promises, which is expected during interruption
+                // Silently handle - the stop() method handles cleanup internally
+                console.log('TTS stop called (interruption expected)');
+            }
         }
         this.isSpeaking = false;
+        this.updateSpeakingState();
         this.speechQueue = []; // Clear queue to prevent continuing
         this.currentSpeakingPromise = null;
         this.stopWaveform();
@@ -1842,34 +2253,64 @@ class ChatbotPopup {
                 // Duck TTS volume immediately
                 this.duckTTS(0.15);
                 
-                // Start recognition IMMEDIATELY to capture user speech (don't wait for TTS to stop)
-                // This ensures we capture the speech that triggered the barge-in
-                if (!this.isMuted && !this.recognitionActive && !this._startingRecognition && this.recognition) {
-                    this.startRecognition().catch(err => {
-                        console.warn('Failed to start recognition after barge-in:', err);
-                    });
+                // Stop TTS immediately to reduce echo interference
+                if (this.isSpeaking) {
+                    try {
+                        this.stopSpeaking();
+                    } catch (error) {
+                        console.log('TTS stopped during barge-in (expected)');
+                    }
                 }
                 
-                // After 80ms, stop TTS (recognition is already running)
-                setTimeout(() => {
-                    if (this.isSpeaking) {
-                        this.stopSpeaking();
+                // Start recognition IMMEDIATELY (fast start - skip permission check if possible)
+                // This ensures we capture the speech that triggered the barge-in
+                if (!this.isMuted && this.recognition) {
+                    // Try to start recognition immediately without waiting for permission check
+                    // if we're already active or starting, that's fine - it will capture
+                    if (!this.recognitionActive && !this._startingRecognition) {
+                        // Fast start - try direct start first (if permission already granted)
+                        try {
+                            this.recognitionActive = true;
+                            this.isListening = true;
+                            this.recognition.start();
+                            console.log('Recognition started immediately for barge-in');
+                        } catch (e) {
+                            // If direct start fails, fall back to full startRecognition
+                            console.log('Direct start failed, using full startRecognition:', e);
+                            this.recognitionActive = false;
+                            this.isListening = false;
+                            this.startRecognition().catch(err => {
+                                console.warn('Failed to start recognition after barge-in:', err);
+                            });
+                        }
+                    } else {
+                        console.log('Recognition already active or starting, should capture speech');
                     }
-                    // Clear barge-in flag after a delay to allow recognition to process
-                    // Also clear TTS stop time after echo period to allow legitimate input
-                    setTimeout(() => {
+                }
+                
+                // Clear barge-in flag after a delay to allow recognition to process
+                // Also clear TTS stop time after echo period to allow legitimate input
+                setTimeout(() => {
+                    // Only clear if still set (might have been cleared by successful recognition)
+                    if (this._bargeInDetected) {
+                        console.log('Barge-in flag cleared after timeout (no recognition received)');
                         this._bargeInDetected = false;
-                        // Clear TTS stop time after echo period (500ms) to allow legitimate input
-                        if (this._ttsStopTime && (Date.now() - this._ttsStopTime) > 500) {
-                            this._ttsStopTime = null;
+                        // If no response was received, resume listening for user input
+                        if (this.waitingForResponse && !this.isSpeaking) {
+                            console.log('No recognition received during barge-in, resuming listening');
+                            this.resumeRecognitionIfNeeded();
                         }
-                        // Clear any pending interim timeout
-                        if (this._bargeInInterimTimeout) {
-                            clearTimeout(this._bargeInInterimTimeout);
-                            this._bargeInInterimTimeout = null;
-                        }
-                    }, 5000); // Give recognition 5 seconds to capture speech
-                }, 80);
+                    }
+                    // Clear TTS stop time after echo period (300ms for barge-in, less aggressive)
+                    if (this._ttsStopTime && (Date.now() - this._ttsStopTime) > 300) {
+                        this._ttsStopTime = null;
+                    }
+                    // Clear any pending interim timeout
+                    if (this._bargeInInterimTimeout) {
+                        clearTimeout(this._bargeInInterimTimeout);
+                        this._bargeInInterimTimeout = null;
+                    }
+                }, 10000); // Give recognition 10 seconds to capture speech (increased)
             }
         } else {
             // Reset threshold tracking if below threshold
@@ -1895,13 +2336,117 @@ class ChatbotPopup {
     }
 
     handleVoiceInput(transcript) {
+        console.log('handleVoiceInput called with transcript:', transcript);
+        
+        // Normalize and clean transcript
+        let cleanTranscript = transcript.trim();
+        if (!cleanTranscript || cleanTranscript.length < 2) {
+            console.log('Transcript too short, ignoring');
+            return;
+        }
+        
+        // Filter out TTS echo from transcript
+        // Remove any parts that match recent TTS text
+        if (this._recentTTSText.length > 0) {
+            const transcriptLower = cleanTranscript.toLowerCase();
+            for (const ttsText of this._recentTTSText) {
+                const ttsLower = ttsText.toLowerCase();
+                // If transcript starts with TTS text, remove that part
+                if (transcriptLower.startsWith(ttsLower.substring(0, Math.min(30, ttsLower.length)))) {
+                    // Find where TTS text ends in transcript
+                    const ttsWords = ttsLower.split(/\s+/);
+                    const transcriptWords = cleanTranscript.split(/\s+/);
+                    let ttsWordIndex = 0;
+                    let transcriptWordIndex = 0;
+                    
+                    // Skip matching words at the start
+                    while (ttsWordIndex < ttsWords.length && 
+                           transcriptWordIndex < transcriptWords.length &&
+                           transcriptWords[transcriptWordIndex].toLowerCase().includes(ttsWords[ttsWordIndex])) {
+                        transcriptWordIndex++;
+                        ttsWordIndex++;
+                    }
+                    
+                    // Get remaining words (user's actual speech)
+                    if (transcriptWordIndex < transcriptWords.length) {
+                        cleanTranscript = transcriptWords.slice(transcriptWordIndex).join(' ').trim();
+                        console.log('Filtered TTS echo from transcript, remaining:', cleanTranscript);
+                    } else {
+                        // Entire transcript was TTS echo
+                        console.log('Transcript appears to be entirely TTS echo, ignoring');
+                        return;
+                    }
+                }
+            }
+        }
+        
+        // Final check - if transcript is too short after filtering, ignore it
+        if (cleanTranscript.length < 3) {
+            console.log('Transcript too short after filtering, ignoring');
+            return;
+        }
+        
+        // Prevent duplicate processing - check if we just processed this
+        const now = Date.now();
+        if (this._lastProcessedTranscript === cleanTranscript && 
+            (now - this._lastProcessedTime) < 2000) {
+            console.log('Duplicate transcript detected, ignoring');
+            return;
+        }
+        this._lastProcessedTranscript = cleanTranscript;
+        this._lastProcessedTime = now;
+        
+        // Check if user is responding to download pitch (voice input)
+        const lowerMessage = cleanTranscript.toLowerCase().trim();
+        const isYesResponse = /^(yes|yeah|yea|yep|sure|ok|okay|definitely|absolutely|please|y)$/i.test(lowerMessage) ||
+                              lowerMessage.includes('yes') || lowerMessage.includes('sure') || lowerMessage.includes('walk me through');
+        const isNoResponse = /^(no|nope|nah|not now|later|maybe later|n)$/i.test(lowerMessage) ||
+                             (lowerMessage.includes('no') && !lowerMessage.includes('know'));
+
+        // Handle yes response - show download button immediately
+        if (isYesResponse && this.waitingForDownloadResponse) {
+            this.waitingForDownloadResponse = false;
+            this.stopListening();
+            this._bargeInDetected = false;
+            const downloadMsg = "Great! Begin by pressing the Download button below to get protected.";
+            this.addMessageToChat(cleanTranscript, 'user');
+            this.addMessageToChat(downloadMsg, 'agent');
+            this.showInstallButton();
+            this.speak(downloadMsg).catch(err => console.error('TTS error:', err));
+            return;
+        }
+
+        // Handle no response - give counter-pitch
+        if (isNoResponse && this.waitingForDownloadResponse) {
+            this.waitingForDownloadResponse = false;
+            this.stopListening();
+            this._bargeInDetected = false;
+            const counterPitch = "I understand, but your PC is vulnerable to hackers, malware, and identity theft right now. AI PC Protect provides 24/7 real-time protection. Are you sure you don't want me to walk you through the quick download?";
+            this.addMessageToChat(cleanTranscript, 'user');
+            this.addMessageToChat(counterPitch, 'agent');
+            this.waitingForDownloadResponse = true; // Keep waiting for their response
+            this.speak(counterPitch).catch(err => console.error('TTS error:', err));
+            return;
+        }
+        
         // Stop listening
         this.stopListening();
+        
+        // Clear barge-in flag if set
+        this._bargeInDetected = false;
+        
+        // Switch to chat view if not already there
+        const callView = document.getElementById('callView');
+        const chatView = document.getElementById('chatView');
+        if (callView && chatView) {
+            callView.style.display = 'none';
+            chatView.style.display = 'block';
+        }
         
         // Set the input value and send
         const chatInput = document.getElementById('chatInput');
         if (chatInput) {
-            chatInput.value = transcript;
+            chatInput.value = cleanTranscript;
             // Show visual feedback that voice input was received
             const voiceStatus = document.getElementById('voiceStatus');
             if (voiceStatus) {
@@ -1912,7 +2457,10 @@ class ChatbotPopup {
                     }
                 }, 2000);
             }
+            console.log('Sending message from voice input:', cleanTranscript);
             this.sendMessage();
+        } else {
+            console.error('Chat input not found');
         }
     }
 

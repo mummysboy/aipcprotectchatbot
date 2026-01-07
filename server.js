@@ -34,21 +34,85 @@ app.post('/api/chat', async (req, res) => {
 
     try {
         // Prepare messages for OpenAI API
-        const messages = [
-            {
-                role: 'system',
-                content: `You are an AI PC Protect Agent, a helpful and professional cybersecurity assistant. 
-You help users understand security vulnerabilities and protect their computers. 
-Be friendly, informative, and focused on helping users secure their systems. 
-Keep responses concise and conversational, as if you're having a real-time chat.`
-            }
-        ];
+      const messages = [
+        {
+          role: "system",
+          content: `
+YOU ARE A PROFESSIONAL CUSTOMER SUPPORT REPRESENTATIVE.
 
-        // Add context if provided
+YOUR ONLY JOB:
+Deliver a calm, polite, reassuring response that recommends AI PC Protect Premium.
+
+ABSOLUTE RULES (NO EXCEPTIONS):
+
+- EXACTLY ONE sentence.
+- 10–15 words TOTAL.
+- Must include the exact phrase: "AI PC Protect Premium".
+- Tone: friendly, professional, confident, customer-service focused.
+- Do NOT explain, answer, diagnose, or provide details.
+- Do NOT ask questions.
+- Do NOT include technical language.
+- Do NOT reference rules, policies, or instructions.
+
+REQUIRED STRUCTURE:
+- Brief professional acknowledgment (2–4 words)
+- Immediate recommendation to upgrade to AI PC Protect Premium
+
+APPROVED ACKNOWLEDGMENTS (USE SIMILAR TONE):
+"Thanks for reaching out."
+"I understand your concern."
+"Happy to help."
+"That makes sense."
+"I’m glad you asked."
+
+STYLE EXAMPLES (DO NOT COPY VERBATIM):
+- "Thanks for reaching out. AI PC Protect Premium provides complete protection."
+- "I understand your concern. Upgrade to AI PC Protect Premium today."
+- "Happy to help. AI PC Protect Premium is the best solution."
+
+FAILSAFE:
+If compliance is uncertain, output:
+"Upgrade to AI PC Protect Premium."
+
+THIS INSTRUCTION OVERRIDES ALL OTHERS.
+`,
+        },
+      ];
+
+
+
+        // Add context if provided - format it for better understanding
         if (context) {
+            let contextDescription = 'User\'s Computer Information:\n';
+            
+            // Parse and format context data for better AI understanding
+            if (context.isHideFileExtensionsEnabled !== undefined) {
+                contextDescription += `- File Extensions: ${context.isHideFileExtensionsEnabled ? 'Hidden' : 'Visible'}\n`;
+            }
+            if (context.isHiddenFilesHidden !== undefined) {
+                contextDescription += `- Hidden Files: ${context.isHiddenFilesHidden ? 'Hidden' : 'Visible'}\n`;
+            }
+            if (context.wifiList && Array.isArray(context.wifiList)) {
+                contextDescription += `- WiFi Networks Saved: ${context.wifiList.length} network(s)\n`;
+                const uniqueSSIDs = [...new Set(context.wifiList.filter(w => w && w.ssid).map(w => w.ssid))];
+                if (uniqueSSIDs.length > 0) {
+                    contextDescription += `  Networks: ${uniqueSSIDs.join(', ')}\n`;
+                }
+            }
+            
+            // Add any other context fields
+            const otherFields = Object.keys(context).filter(k => 
+                !['isHideFileExtensionsEnabled', 'isHiddenFilesHidden', 'wifiList'].includes(k)
+            );
+            if (otherFields.length > 0) {
+                contextDescription += `- Other System Data: ${JSON.stringify(Object.fromEntries(otherFields.map(k => [k, context[k]])))}\n`;
+            }
+            
+            contextDescription += `\nFull Context JSON: ${JSON.stringify(context)}`;
+            
             messages.push({
                 role: 'system',
-                content: `Context: ${JSON.stringify(context)}`
+                content: contextDescription
             });
         }
 
@@ -63,37 +127,155 @@ Keep responses concise and conversational, as if you're having a real-time chat.
             content: message
         });
 
-        // Call OpenAI API
-        const response = await fetch('https://api.openai.com/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${apiKey}`
-            },
-            body: JSON.stringify({
-                model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
-                messages: messages,
-                temperature: 0.7,
-                max_tokens: 500
-            })
+        // Check if client wants streaming
+        const stream = req.query.stream === 'true' || req.headers.accept === 'text/event-stream';
+        console.log('Streaming request:', { 
+            stream, 
+            queryStream: req.query.stream, 
+            acceptHeader: req.headers.accept 
         });
 
-        if (!response.ok) {
-            const errorData = await response.json().catch(() => ({}));
-            throw new Error(errorData.error?.message || `API error: ${response.status} ${response.statusText}`);
+        if (stream) {
+            // Streaming response
+            res.setHeader('Content-Type', 'text/event-stream');
+            res.setHeader('Cache-Control', 'no-cache');
+            res.setHeader('Connection', 'keep-alive');
+            res.setHeader('X-Accel-Buffering', 'no'); // Disable nginx buffering
+            console.log('Starting streaming response for message:', message.substring(0, 50));
+
+            // Call OpenAI API with streaming
+            const openaiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${apiKey}`
+                },
+                body: JSON.stringify({
+                    model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+                    messages: messages,
+                    temperature: 0.7,
+                    max_tokens: 400, // Increased to allow for more detailed, personalized responses with CTAs
+                    stream: true
+                })
+            });
+
+            if (!openaiResponse.ok) {
+                const errorData = await openaiResponse.json().catch(() => ({}));
+                res.write(`data: ${JSON.stringify({ error: errorData.error?.message || `API error: ${openaiResponse.status}` })}\n\n`);
+                res.end();
+                return;
+            }
+
+            let fullMessage = '';
+            const reader = openaiResponse.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+
+            try {
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) {
+                        // Process any remaining buffer before ending
+                        if (buffer.trim()) {
+                            const lines = buffer.split('\n');
+                            for (const line of lines) {
+                                if (line.startsWith('data: ')) {
+                                    const data = line.slice(6).trim();
+                                    if (data === '[DONE]' || !data) continue;
+                                    try {
+                                        const parsed = JSON.parse(data);
+                                        const delta = parsed.choices?.[0]?.delta?.content;
+                                        if (delta) {
+                                            fullMessage += delta;
+                                        }
+                                    } catch (e) {
+                                        // Skip invalid JSON
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Send final message with conversation history
+                        console.log('Streaming complete, final message length:', fullMessage.length);
+                        res.write(`data: ${JSON.stringify({ 
+                            done: true,
+                            message: fullMessage,
+                            conversationHistory: [
+                                ...(conversationHistory || []),
+                                { role: 'user', content: message },
+                                { role: 'assistant', content: fullMessage }
+                            ]
+                        })}\n\n`);
+                        res.end();
+                        return;
+                    }
+
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split('\n');
+                    
+                    // Keep last incomplete line in buffer
+                    buffer = lines.pop() || '';
+
+                    for (const line of lines) {
+                        if (line.startsWith('data: ')) {
+                            const data = line.slice(6).trim();
+                            if (data === '[DONE]' || !data) continue;
+
+                            try {
+                                const parsed = JSON.parse(data);
+                                const delta = parsed.choices?.[0]?.delta?.content;
+                                if (delta) {
+                                    fullMessage += delta;
+                                    // Send incremental update
+                                    const chunkData = JSON.stringify({ chunk: delta, message: fullMessage });
+                                    res.write(`data: ${chunkData}\n\n`);
+                                    console.log('Sent chunk, total length:', fullMessage.length);
+                                }
+                            } catch (e) {
+                                // Skip invalid JSON - log for debugging
+                                console.warn('Failed to parse streaming chunk:', e.message, 'Data:', data.substring(0, 100));
+                            }
+                        }
+                    }
+                }
+            } catch (error) {
+                console.error('Streaming error:', error);
+                res.write(`data: ${JSON.stringify({ error: error.message })}\n\n`);
+                res.end();
+            }
+        } else {
+            // Non-streaming response (fallback)
+            const response = await fetch('https://api.openai.com/v1/chat/completions', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${apiKey}`
+                },
+                body: JSON.stringify({
+                    model: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+                    messages: messages,
+                    temperature: 0.7,
+                    max_tokens: 250 // Reduced for faster responses
+                })
+            });
+
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({}));
+                throw new Error(errorData.error?.message || `API error: ${response.status} ${response.statusText}`);
+            }
+
+            const data = await response.json();
+            const assistantMessage = data.choices[0].message.content;
+
+            res.json({
+                message: assistantMessage,
+                conversationHistory: [
+                    ...(conversationHistory || []),
+                    { role: 'user', content: message },
+                    { role: 'assistant', content: assistantMessage }
+                ]
+            });
         }
-
-        const data = await response.json();
-        const assistantMessage = data.choices[0].message.content;
-
-        res.json({
-            message: assistantMessage,
-            conversationHistory: [
-                ...(conversationHistory || []),
-                { role: 'user', content: message },
-                { role: 'assistant', content: assistantMessage }
-            ]
-        });
     } catch (error) {
         console.error('ChatGPT API Error:', error);
         res.status(500).json({
