@@ -1,16 +1,14 @@
 // Text-to-Speech Service
-// Supports both ElevenLabs (premium) and browser TTS (fallback)
+// Supports both Speechmatics (premium) and browser TTS (fallback)
 
 class TTSService {
     constructor(options = {}) {
-        this.provider = options.provider || 'browser'; // 'elevenlabs' or 'browser'
+        this.provider = options.provider || 'browser'; // 'speechmatics' or 'browser'
         this.apiKey = options.apiKey || null;
-        this.voiceId = options.voiceId || null; // ElevenLabs voice ID
-        this.modelId = options.modelId || 'eleven_turbo_v2_5'; // ElevenLabs model (updated for free tier)
-        this.stability = options.stability || 0.5;
-        this.similarityBoost = options.similarityBoost || 0.75;
-        this.style = options.style || 0.0;
-        this.useSpeakerBoost = options.useSpeakerBoost || true;
+        this.voiceId = options.voiceId || null; // Speechmatics voice ID
+        this.outputFormat = options.outputFormat || 'mp3'; // Speechmatics output format (mp3 is more efficient than pcm)
+        this.sampleRate = options.sampleRate || 44100; // Speechmatics sample rate
+        this.playbackRate = options.playbackRate || 1.25; // Audio playback speed (1.0 = normal, 1.25 = 25% faster, 1.5 = 50% faster)
         
         // Browser TTS fallback
         this.synthesis = null;
@@ -125,10 +123,10 @@ class TTSService {
             textLength: text.length
         });
 
-        // Use ElevenLabs if configured (API key is handled server-side)
-        if (this.provider === 'elevenlabs' && this.voiceId) {
-            console.log('Using ElevenLabs TTS');
-            return this.speakWithElevenLabs(text, options);
+        // Use Speechmatics if configured (API key is handled server-side)
+        if (this.provider === 'speechmatics' && this.voiceId) {
+            console.log('Using Speechmatics TTS');
+            return this.speakWithSpeechmatics(text, options);
         }
 
         // Fallback to browser TTS
@@ -138,13 +136,14 @@ class TTSService {
 
     async preloadAudio(text, options = {}) {
         // Preload audio in background without playing
-        if (this.provider !== 'elevenlabs' || !this.voiceId) {
+        if (this.provider !== 'speechmatics' || !this.voiceId) {
             return null;
         }
 
         try {
             const voiceId = options.voiceId || this.voiceId;
-            const modelId = options.modelId || this.modelId;
+            const outputFormat = options.outputFormat || this.outputFormat;
+            const sampleRate = options.sampleRate || this.sampleRate;
 
             // Use API config for base URL (supports both local and hosted environments)
             const apiUrl = window.API_CONFIG ? window.API_CONFIG.getApiUrl('/api/tts') : '/api/tts';
@@ -157,11 +156,8 @@ class TTSService {
                 body: JSON.stringify({
                     text: text,
                     voiceId: voiceId,
-                    modelId: modelId,
-                    stability: options.stability !== undefined ? options.stability : this.stability,
-                    similarityBoost: options.similarityBoost !== undefined ? options.similarityBoost : this.similarityBoost,
-                    style: options.style !== undefined ? options.style : this.style,
-                    useSpeakerBoost: options.useSpeakerBoost !== undefined ? options.useSpeakerBoost : this.useSpeakerBoost
+                    outputFormat: outputFormat,
+                    sampleRate: sampleRate
                 })
             });
 
@@ -197,7 +193,7 @@ class TTSService {
         }
     }
 
-    async speakWithElevenLabs(text, options = {}) {
+    async speakWithSpeechmatics(text, options = {}) {
         try {
             // Check if we have preloaded audio for this text
             if (this.preloadedAudio && this.preloadedAudio.text === text) {
@@ -213,6 +209,7 @@ class TTSService {
                 this.currentAudioUrl = audioUrl; // Track URL for cleanup
                 this.isPlaying = true;
                 audio.volume = options.volume !== undefined ? options.volume : 1;
+                audio.playbackRate = options.playbackRate !== undefined ? options.playbackRate : this.playbackRate;
                 
                 return new Promise(async (resolve, reject) => {
                     // Store reject callback so stop() can reject this promise
@@ -281,15 +278,16 @@ class TTSService {
             // Stop any current audio (already done in speak())
 
             const voiceId = options.voiceId || this.voiceId;
-            const modelId = options.modelId || this.modelId;
+            const outputFormat = options.outputFormat || this.outputFormat;
+            const sampleRate = options.sampleRate || this.sampleRate;
             
             if (!voiceId) {
-                console.error('ElevenLabs voiceId not configured');
+                console.error('Speechmatics voiceId not configured');
                 console.log('Falling back to browser TTS');
                 return this.speakWithBrowser(text, options);
             }
 
-            console.log('Calling ElevenLabs TTS API with voice:', voiceId);
+            console.log('Calling Speechmatics TTS API with voice:', voiceId);
 
             // Call server endpoint to generate speech
             // Use API config for base URL (supports both local and hosted environments)
@@ -303,11 +301,8 @@ class TTSService {
                 body: JSON.stringify({
                     text: text,
                     voiceId: voiceId,
-                    modelId: modelId,
-                    stability: options.stability !== undefined ? options.stability : this.stability,
-                    similarityBoost: options.similarityBoost !== undefined ? options.similarityBoost : this.similarityBoost,
-                    style: options.style !== undefined ? options.style : this.style,
-                    useSpeakerBoost: options.useSpeakerBoost !== undefined ? options.useSpeakerBoost : this.useSpeakerBoost
+                    outputFormat: outputFormat,
+                    sampleRate: sampleRate
                 })
             });
 
@@ -320,7 +315,7 @@ class TTSService {
                     error = { message: errorText };
                 }
                 
-                console.error('ElevenLabs TTS API error:', {
+                console.error('Speechmatics TTS API error:', {
                     status: response.status,
                     statusText: response.statusText,
                     error: error,
@@ -331,7 +326,7 @@ class TTSService {
                 return this.speakWithBrowser(text, options);
             }
 
-            console.log('ElevenLabs TTS API success, processing audio...');
+            console.log('Speechmatics TTS API success, processing audio...');
             console.log('Response content-type:', response.headers.get('content-type'));
             console.log('Response status:', response.status);
 
@@ -415,6 +410,7 @@ class TTSService {
 
                 // Set audio properties
                 audio.volume = options.volume !== undefined ? options.volume : 1;
+                audio.playbackRate = options.playbackRate !== undefined ? options.playbackRate : this.playbackRate;
                 audio.preload = 'auto';
 
                 console.log('Audio element created, attempting to play...');
@@ -563,7 +559,7 @@ class TTSService {
             });
 
         } catch (error) {
-            console.error('ElevenLabs TTS error:', error);
+            console.error('Speechmatics TTS error:', error);
             // Fallback to browser TTS
             return this.speakWithBrowser(text, options);
         }
@@ -584,7 +580,10 @@ class TTSService {
             this.synthesis.cancel();
 
             const utterance = new SpeechSynthesisUtterance(text);
-            utterance.rate = options.rate !== undefined ? options.rate : 0.9;
+            // Convert playbackRate (1.0-2.0) to browser TTS rate (0.1-10.0, where 1.0 = normal)
+            // Default browser rate is 1.0, so we scale: playbackRate 1.25 = rate 1.25, but cap at reasonable values
+            const browserRate = options.rate !== undefined ? options.rate : (this.playbackRate * 1.0);
+            utterance.rate = Math.min(Math.max(browserRate, 0.5), 2.0); // Clamp between 0.5 and 2.0
             utterance.pitch = options.pitch !== undefined ? options.pitch : 1;
             utterance.volume = options.volume !== undefined ? options.volume : 1;
             utterance.lang = options.lang || this.voiceLang;
@@ -724,12 +723,8 @@ class TTSService {
         this.onErrorCallback = callback;
     }
 
-    // Get available ElevenLabs voices (requires API call)
-    async getElevenLabsVoices() {
-        if (!this.apiKey) {
-            throw new Error('ElevenLabs API key not configured');
-        }
-
+    // Get available Speechmatics voices (requires API call)
+    async getSpeechmaticsVoices() {
         try {
             // Use API config for base URL (supports both local and hosted environments)
             const apiUrl = window.API_CONFIG ? window.API_CONFIG.getApiUrl('/api/tts/voices') : '/api/tts/voices';
@@ -747,7 +742,7 @@ class TTSService {
 
             return await response.json();
         } catch (error) {
-            console.error('Error fetching ElevenLabs voices:', error);
+            console.error('Error fetching Speechmatics voices:', error);
             throw error;
         }
     }

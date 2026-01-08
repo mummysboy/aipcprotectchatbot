@@ -5,15 +5,11 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // Configure voice options for both chatbot and phone call
     // 
-    // For ElevenLabs (premium, high quality):
-    //   ttsProvider: 'elevenlabs'
-    //   elevenLabsVoiceId: 'VOICE_ID_HERE' (get from https://elevenlabs.io)
-    //   Popular voices:
-    //     - Rachel: 21m00Tcm4TlvDq8ikWAM (Professional female)
-    //     - Domi: AZnzlk1XvdvUeBnXmlld (Confident female)
-    //     - Bella: EXAVITQu4vr4xnSDxMaL (Soft female)
-    //     - Antoni: ErXwobaYiN019PkySvjV (Warm male)
-    //     - Elli: MF3mGyEYCl7XYWbV9V6O (Friendly female)
+    // For Speechmatics (premium, high quality):
+    //   ttsProvider: 'speechmatics'
+    //   speechmaticsVoiceId: 'VOICE_ID_HERE' (get from Speechmatics API)
+    //   outputFormat: 'pcm_f32le' (default) or 'mp3', 'pcm_s16le', etc.
+    //   sampleRate: 44100 (default) or other supported rates
     //
     // For Browser TTS (free, lower quality):
     //   ttsProvider: 'browser'
@@ -21,9 +17,10 @@ document.addEventListener('DOMContentLoaded', function() {
     //   voiceGender: 'male' or 'female' to filter voices
     //   voiceLang: language code (e.g., 'en-US', 'en-GB')
     const voiceOptions = {
-      // Use ElevenLabs for premium quality (requires ELEVENLABS_API_KEY in .env)
-      ttsProvider: "elevenlabs",
-      elevenLabsVoiceId: "CwhRBWXzGAHq8TQ4Fs17", // Hope - Professional female voice
+      // Use Speechmatics for premium quality (requires SPEECHMATICS_API_KEY in .env)
+      ttsProvider: "speechmatics",
+      speechmaticsVoiceId: "theo", // Available voices: theo, sarah, megan, jack (lowercase)
+      playbackRate: 1.35, // Playback speed: 1.0 = normal, 1.25 = 25% faster, 1.5 = 50% faster (default: 1.25)
 
       // Or use browser TTS (fallback or if no API key):
       // ttsProvider: 'browser',

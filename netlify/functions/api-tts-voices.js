@@ -1,4 +1,4 @@
-// Netlify Function for ElevenLabs Voices
+// Netlify Function for Speechmatics Voices
 exports.handler = async (event, context) => {
     // Handle CORS
     const headers = {
@@ -26,29 +26,56 @@ exports.handler = async (event, context) => {
         };
     }
 
-    const apiKey = process.env.ELEVENLABS_API_KEY;
+    const apiKey = process.env.SPEECHMATICS_API_KEY;
 
     if (!apiKey) {
         return {
             statusCode: 500,
             headers,
             body: JSON.stringify({
-                error: 'ElevenLabs API key is not configured. Please set ELEVENLABS_API_KEY in your Netlify environment variables.'
+                error: 'Speechmatics API key is not configured. Please set SPEECHMATICS_API_KEY in your Netlify environment variables.'
             })
         };
     }
 
     try {
-        const response = await fetch('https://api.elevenlabs.io/v1/voices', {
+        // Speechmatics TTS API - voices endpoint
+        // Note: Speechmatics TTS may not have a separate voices endpoint
+        // Available voices: sarah, theo, megan, jack (as per documentation)
+        const baseUrl = process.env.SPEECHMATICS_API_URL || 'https://preview.tts.speechmatics.com';
+        const endpoint = `${baseUrl}/voices`;
+        
+        console.log(`Using endpoint: ${endpoint}`);
+        
+        const response = await fetch(endpoint, {
             method: 'GET',
             headers: {
-                'xi-api-key': apiKey
+                'Authorization': `Bearer ${apiKey}`,
+                'Content-Type': 'application/json'
             }
         });
 
         if (!response.ok) {
+            // If voices endpoint doesn't exist, return hardcoded list
+            if (response.status === 404) {
+                console.log('Voices endpoint not found, returning hardcoded voice list');
+                const hardcodedVoices = {
+                    voices: [
+                        { voice_id: 'sarah', name: 'Sarah', description: 'Female voice' },
+                        { voice_id: 'theo', name: 'Theo', description: 'Male voice' },
+                        { voice_id: 'megan', name: 'Megan', description: 'Female voice' },
+                        { voice_id: 'jack', name: 'Jack', description: 'Male voice' }
+                    ]
+                };
+                return {
+                    statusCode: 200,
+                    headers,
+                    body: JSON.stringify(hardcodedVoices)
+                };
+            }
+            
             const errorData = await response.json().catch(() => ({}));
-            throw new Error(errorData.detail?.message || `ElevenLabs API error: ${response.status} ${response.statusText}`);
+            throw new Error(errorData.error?.message || `Speechmatics API error: ${response.status} ${response.statusText}`);
         }
 
         const data = await response.json();
@@ -60,12 +87,12 @@ exports.handler = async (event, context) => {
         };
 
     } catch (error) {
-        console.error('ElevenLabs Voices Error:', error);
+        console.error('Speechmatics Voices Error:', error);
         return {
             statusCode: 500,
             headers,
             body: JSON.stringify({
-                error: error.message || 'Failed to fetch voices from ElevenLabs'
+                error: error.message || 'Failed to fetch voices from Speechmatics'
             })
         };
     }

@@ -1,4 +1,4 @@
-// Netlify Function for ElevenLabs TTS
+// Netlify Function for Speechmatics TTS
 exports.handler = async (event, context) => {
     // Handle CORS
     const headers = {
@@ -32,7 +32,7 @@ exports.handler = async (event, context) => {
         };
     }
 
-    const apiKey = process.env.ELEVENLABS_API_KEY;
+    const apiKey = process.env.SPEECHMATICS_API_KEY;
 
     if (!apiKey) {
         return {
@@ -42,13 +42,13 @@ exports.handler = async (event, context) => {
                 'Content-Type': 'application/json'
             },
             body: JSON.stringify({
-                error: 'ElevenLabs API key is not configured. Please set ELEVENLABS_API_KEY in your Netlify environment variables.'
+                error: 'Speechmatics API key is not configured. Please set SPEECHMATICS_API_KEY in your Netlify environment variables.'
             })
         };
     }
 
     try {
-        const { text, voiceId, modelId, stability, similarityBoost, style, useSpeakerBoost } = JSON.parse(event.body || '{}');
+        const { text, voiceId, outputFormat, sampleRate } = JSON.parse(event.body || '{}');
 
         if (!text) {
             return {
@@ -76,23 +76,28 @@ exports.handler = async (event, context) => {
             };
         }
 
+        // Speechmatics TTS API request format
+        // Voice ID goes in the URL path, not the request body
+        // Voice IDs should be lowercase (theo, sarah, megan, jack)
         const requestBody = {
-            text: text,
-            model_id: modelId || 'eleven_turbo_v2_5',
-            voice_settings: {
-                stability: stability !== undefined ? stability : 0.5,
-                similarity_boost: similarityBoost !== undefined ? similarityBoost : 0.75,
-                style: style !== undefined ? style : 0.0,
-                use_speaker_boost: useSpeakerBoost !== undefined ? useSpeakerBoost : true
-            }
+            text: text
         };
 
-        const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
+        // Convert voice ID to lowercase for API compatibility
+        const normalizedVoiceId = voiceId.toLowerCase();
+
+        // Speechmatics TTS API endpoint format: https://preview.tts.speechmatics.com/generate/<voice_id>
+        const baseUrl = process.env.SPEECHMATICS_API_URL || 'https://preview.tts.speechmatics.com';
+        const endpoint = `${baseUrl}/generate/${normalizedVoiceId}`;
+        
+        console.log(`Using endpoint: ${endpoint}`);
+        
+        const response = await fetch(endpoint, {
             method: 'POST',
             headers: {
-                'Accept': 'audio/mpeg',
+                'Accept': 'audio/*',
                 'Content-Type': 'application/json',
-                'xi-api-key': apiKey
+                'Authorization': `Bearer ${apiKey}`
             },
             body: JSON.stringify(requestBody)
         });
@@ -106,7 +111,7 @@ exports.handler = async (event, context) => {
                 errorData = { message: errorText };
             }
             
-            const errorMessage = errorData.detail?.message || errorData.message || `ElevenLabs API error: ${response.status} ${response.statusText}`;
+            const errorMessage = errorData.error?.message || errorData.message || `Speechmatics API error: ${response.status} ${response.statusText}`;
             
             return {
                 statusCode: 500,
@@ -126,10 +131,13 @@ exports.handler = async (event, context) => {
         const audioBuffer = await response.arrayBuffer();
         const audioBase64 = Buffer.from(audioBuffer).toString('base64');
         
+        // Determine content type from response or default
+        const contentType = response.headers.get('content-type') || 'audio/mpeg';
+        
         return {
             statusCode: 200,
             headers: {
-                'Content-Type': 'audio/mpeg',
+                'Content-Type': contentType,
                 'Content-Length': audioBuffer.byteLength.toString(),
                 'Access-Control-Allow-Origin': '*'
             },
@@ -138,7 +146,7 @@ exports.handler = async (event, context) => {
         };
 
     } catch (error) {
-        console.error('ElevenLabs TTS Error:', error);
+        console.error('Speechmatics TTS Error:', error);
         return {
             statusCode: 500,
             headers: {
@@ -146,7 +154,7 @@ exports.handler = async (event, context) => {
                 'Content-Type': 'application/json'
             },
             body: JSON.stringify({
-                error: error.message || 'Failed to generate speech with ElevenLabs',
+                error: error.message || 'Failed to generate speech with Speechmatics',
                 details: error.toString()
             })
         };

@@ -21,8 +21,9 @@ class ChatbotPopup {
         this.voiceLang = options.voiceLang || 'en-US';
         
         // TTS Provider options
-        this.ttsProvider = options.ttsProvider || 'browser'; // 'elevenlabs' or 'browser'
-        this.elevenLabsVoiceId = options.elevenLabsVoiceId || null;
+        this.ttsProvider = options.ttsProvider || 'browser'; // 'speechmatics' or 'browser'
+        this.speechmaticsVoiceId = options.speechmaticsVoiceId || null;
+        this.playbackRate = options.playbackRate || 1.25; // Audio playback speed
         
         // Phone call flow state
         this.speechQueue = [];
@@ -79,12 +80,13 @@ class ChatbotPopup {
     }
 
     initTTS() {
-        // Initialize TTS service (ElevenLabs or browser fallback)
+        // Initialize TTS service (Speechmatics or browser fallback)
         this.ttsService = new TTSService({
             provider: this.ttsProvider,
             apiKey: null, // API key handled by server
-            voiceId: this.elevenLabsVoiceId,
-            voiceLang: this.voiceLang
+            voiceId: this.speechmaticsVoiceId,
+            voiceLang: this.voiceLang,
+            playbackRate: this.playbackRate // Pass through playback rate option
         });
         
         this.ttsService.init();
@@ -114,8 +116,8 @@ class ChatbotPopup {
     preloadCommonPhrases() {
         // Preload common phrases that are likely to be used
         // This reduces latency when these phrases need to be spoken
-        if (!this.ttsService || this.ttsProvider !== 'elevenlabs') {
-            return; // Only preload for ElevenLabs (browser TTS is instant)
+        if (!this.ttsService || this.ttsProvider !== 'speechmatics') {
+            return; // Only preload for Speechmatics (browser TTS is instant)
         }
         
         const commonPhrases = [
@@ -1858,7 +1860,7 @@ class ChatbotPopup {
 
     preloadNextBatch() {
         // Preload the next message(s) while current is playing for faster transitions
-        if (this.speechQueue.length === 0 || !this.ttsService || this.ttsService.provider !== 'elevenlabs') {
+        if (this.speechQueue.length === 0 || !this.ttsService || this.ttsService.provider !== 'speechmatics') {
             return;
         }
 
@@ -2487,31 +2489,28 @@ class ChatbotPopup {
 
     // Utility method to list all available voices
     async listAvailableVoices() {
-        // If using ElevenLabs, fetch those voices
-        if (this.ttsProvider === 'elevenlabs' && this.ttsService) {
+        // If using Speechmatics, fetch those voices
+        if (this.ttsProvider === 'speechmatics' && this.ttsService) {
             try {
-                const voices = await this.ttsService.getElevenLabsVoices();
-                console.log(`\n🎤 Found ${voices.voices?.length || 0} ElevenLabs voices:\n`);
+                const voices = await this.ttsService.getSpeechmaticsVoices();
+                console.log(`\n🎤 Found ${voices.voices?.length || voices.length || 0} Speechmatics voices:\n`);
                 
-                if (voices.voices) {
-                    voices.voices.forEach((voice, index) => {
-                        console.log(`${index + 1}. ${voice.name} (ID: ${voice.voice_id})`);
-                        console.log(`   Category: ${voice.category || 'N/A'} | Description: ${voice.description || 'N/A'}`);
-                    });
-                }
+                const voiceList = voices.voices || voices || [];
+                voiceList.forEach((voice, index) => {
+                    const voiceId = voice.voice_id || voice.id || voice.voice || 'N/A';
+                    const voiceName = voice.name || voice.label || `Voice ${index + 1}`;
+                    console.log(`${index + 1}. ${voiceName} (ID: ${voiceId})`);
+                    if (voice.description || voice.category) {
+                        console.log(`   ${voice.description || voice.category || ''}`);
+                    }
+                });
                 
-                console.log('\n💡 To use an ElevenLabs voice, update voiceOptions in script.js:');
-                console.log('   const voiceOptions = { ttsProvider: "elevenlabs", elevenLabsVoiceId: "VOICE_ID_HERE" };');
-                console.log('\n💡 Popular ElevenLabs voices:');
-                console.log('   - Rachel (21m00Tcm4TlvDq8ikWAM) - Professional female');
-                console.log('   - Domi (AZnzlk1XvdvUeBnXmlld) - Confident female');
-                console.log('   - Bella (EXAVITQu4vr4xnSDxMaL) - Soft female');
-                console.log('   - Antoni (ErXwobaYiN019PkySvjV) - Warm male');
-                console.log('   - Elli (MF3mGyEYCl7XYWbV9V6O) - Friendly female');
+                console.log('\n💡 To use a Speechmatics voice, update voiceOptions in script.js:');
+                console.log('   const voiceOptions = { ttsProvider: "speechmatics", speechmaticsVoiceId: "VOICE_ID_HERE" };');
                 
-                return voices.voices || [];
+                return voiceList;
             } catch (error) {
-                console.error('Error fetching ElevenLabs voices:', error);
+                console.error('Error fetching Speechmatics voices:', error);
                 console.log('Falling back to browser voices...');
             }
         }
@@ -2556,9 +2555,9 @@ class ChatbotPopup {
             return;
         }
 
-        // If using ElevenLabs, test with that
-        if (this.ttsProvider === 'elevenlabs') {
-            console.log(`Testing ElevenLabs voice: ${this.elevenLabsVoiceId}`);
+        // If using Speechmatics, test with that
+        if (this.ttsProvider === 'speechmatics') {
+            console.log(`Testing Speechmatics voice: ${this.speechmaticsVoiceId}`);
             await this.speak(testText);
             return;
         }

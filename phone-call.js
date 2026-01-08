@@ -18,8 +18,9 @@ class PhoneCall {
         this.voiceLang = options.voiceLang || 'en-US'; // Language preference
         
         // TTS Provider options
-        this.ttsProvider = options.ttsProvider || 'browser'; // 'elevenlabs' or 'browser'
-        this.elevenLabsVoiceId = options.elevenLabsVoiceId || null;
+        this.ttsProvider = options.ttsProvider || 'browser'; // 'speechmatics' or 'browser'
+        this.speechmaticsVoiceId = options.speechmaticsVoiceId || null;
+        this.playbackRate = options.playbackRate || 1.25; // Audio playback speed
     }
 
     init() {
@@ -104,12 +105,13 @@ class PhoneCall {
     }
 
     initTTS() {
-        // Initialize TTS service (ElevenLabs or browser fallback)
+        // Initialize TTS service (Speechmatics or browser fallback)
         this.ttsService = new TTSService({
             provider: this.ttsProvider,
             apiKey: null, // API key handled by server
-            voiceId: this.elevenLabsVoiceId,
-            voiceLang: this.voiceLang
+            voiceId: this.speechmaticsVoiceId,
+            voiceLang: this.voiceLang,
+            playbackRate: this.playbackRate // Pass through playback rate option
         });
         
         this.ttsService.init();
