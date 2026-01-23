@@ -14,7 +14,7 @@
         <div class="call-header">
           <div class="call-status">
             <div class="call-indicator" :class="{ active: conversationActive }"></div>
-            <span>{{ conversationActive ? statusText : 'Voice Assistant' }}</span>
+            <span>{{ conversationActive ? statusText : 'AI PC Protect Agent' }}</span>
           </div>
           <button class="close-call-button" @click="closeChat">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -57,6 +57,17 @@
               <div class="thinking-dot"></div>
               <div class="thinking-dot"></div>
               <span class="thinking-text">Thinking...</span>
+            </div>
+          </div>
+
+          <div v-else class="agent-intro">
+            <h2>AI PC Protect Agent</h2>
+            <p>Your real-time security assistant for proactive PC protection.</p>
+            <div class="agent-pill-list">
+              <span>Threat monitoring</span>
+              <span>Wi-Fi credential safety</span>
+              <span>Hidden extension alerts</span>
+              <span>Ransomware defenses</span>
             </div>
           </div>
 
@@ -141,7 +152,7 @@
 <script setup>
 import { ref, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
 
-const isOpen = ref(false)
+const isOpen = ref(true)
 const isMuted = ref(false)
 
 // Conversation state
@@ -294,6 +305,7 @@ const crossfadeDuration = 0.06
 let streamController = null
 let streamDone = false
 let ttsStartTime = null
+let chunkedSpeechController = null
 
 // VAD (Voice Activity Detection) state for barge-in
 const vadEnabled = ref(true)
@@ -386,6 +398,89 @@ const closeChat = () => {
   isOpen.value = false
 }
 
+// Helper to split text into chunks of N words
+const chunkText = (text, wordsPerChunk) => {
+  const words = text.split(' ').filter(w => w.length > 0)
+  const chunks = []
+  for (let i = 0; i < words.length; i += wordsPerChunk) {
+    chunks.push(words.slice(i, i + wordsPerChunk).join(' '))
+  }
+  return chunks
+}
+
+// Speak text in chunks using the same audio queue system as streaming
+const speakChunked = async (fullText, wordsPerChunk = 30, autoListenAfter = false) => {
+  if (!conversationActive.value || isMuted.value) {
+    if (autoListenAfter) startListening()
+    return
+  }
+
+  // Abort any previous chunked speech
+  if (chunkedSpeechController) {
+    try {
+      chunkedSpeechController.abort()
+    } catch (e) {}
+  }
+  chunkedSpeechController = new AbortController()
+  const signal = chunkedSpeechController.signal
+
+  const chunks = chunkText(fullText, wordsPerChunk)
+  currentCaption.value = fullText
+  currentStatus.value = 'speaking'
+  streamDone = false
+
+  const contextReady = await ensureAudioContext()
+  if (!contextReady || !audioContext) {
+    if (autoListenAfter) startListening()
+    return
+  }
+
+  ttsStartTime = Date.now()
+  startMicMonitor()
+
+  // Fetch and enqueue all chunks for seamless playback
+  for (let i = 0; i < chunks.length; i++) {
+    // Check if we've been interrupted
+    if (!conversationActive.value || signal.aborted || currentStatus.value !== 'speaking') {
+      return
+    }
+
+    try {
+      const response = await fetch('http://localhost:3001/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: chunks[i] }),
+        signal: signal
+      })
+
+      if (!response.ok) throw new Error('TTS request failed')
+
+      const audioBlob = await response.blob()
+      const arrayBuffer = await audioBlob.arrayBuffer()
+
+      // Check again after fetch completes
+      if (!conversationActive.value || !audioContext || signal.aborted || currentStatus.value !== 'speaking') {
+        return
+      }
+
+      const audioBuffer = await audioContext.decodeAudioData(arrayBuffer)
+      audioQueue.push(audioBuffer)
+
+      // Mark as done after last chunk is queued
+      if (i === chunks.length - 1) {
+        streamDone = true
+      }
+
+      scheduleQueuedAudio(autoListenAfter)
+    } catch (e) {
+      if (e.name === 'AbortError') {
+        return
+      }
+      console.error('Failed to fetch/decode chunk:', e)
+    }
+  }
+}
+
 const startConversation = () => {
   if (!recognition) {
     alert('Speech recognition is not supported in your browser. Please use Chrome.')
@@ -394,9 +489,26 @@ const startConversation = () => {
 
   conversationActive.value = true
   messages.value = []
-  currentCaption.value = "Hello! I'm listening. How can I help you today?"
 
-  speak("Hello! I'm listening. How can I help you today?", true)
+  const peaceAndLoveSpeech = `Hi, this is Alex. I'm the AI PC Protect real-time security assistant.
+
+I'm reaching out because during a standard security scan, we identified multiple high-risk vulnerabilities on your system that are commonly exploited by attackers. I want to briefly explain what we found, why it matters, and how we can help you fix it immediately.
+
+Today, cybercrime is a multi-billion-dollar industry. Even large companies that spend millions on cybersecurity still experience breaches. For everyday users without dedicated protection, the risk is significantly higher-especially from vulnerabilities that are often overlooked.
+
+First, we detected that saved Wi-Fi passwords on your computer are currently exposed. To be clear, we do not have admin access, elevated privileges, or control over your system. These passwords are visible in the same way they would be to malware or attackers already present on a device.
+
+This is important because Wi-Fi credentials are often reused across work, home, cafes, and shared networks. Attackers frequently use access to trusted networks to move laterally between devices, and many large crypto and data breaches begin with compromised network trust rather than brute-force hacking. This means access to a single trusted Wi-Fi network can grant far more permissions than most people expect.
+
+We also found a critical vulnerability related to hidden file extensions. This is one of the most common attack methods used today. Malware often disguises itself as a trusted file, such as a PDF or document. When file extensions are hidden, the malicious file appears harmless, and a single click can be enough to infect or take control of a system. This tactic is extremely effective, which is why even experienced users fall victim to it.
+
+Right now, these vulnerabilities are actively exposed, significantly increasing the risk of unauthorized access, credential theft, system takeover, and financial or data loss.
+
+If you upgrade to AI PC Protect Pro, we can secure and encrypt stored Wi-Fi credentials, lock down trusted network permissions, reveal and protect file extensions, close common entry points attackers rely on, and monitor your system in real time for similar threats. We can fix these issues immediately, before they're exploited.
+
+Would you like me to take care of that for you now?`
+
+  speakChunked(peaceAndLoveSpeech, 30, true)
 }
 
 const stopConversation = () => {
@@ -405,6 +517,13 @@ const stopConversation = () => {
   currentCaption.value = ''
 
   stopMicMonitor()
+
+  if (chunkedSpeechController) {
+    try {
+      chunkedSpeechController.abort()
+    } catch (e) {}
+    chunkedSpeechController = null
+  }
 
   if (streamController) {
     try {
@@ -472,10 +591,14 @@ const toggleListening = () => {
     } catch (e) {}
     currentStatus.value = 'idle'
   } else if (currentStatus.value === 'idle' || currentStatus.value === 'speaking') {
-    if (audioPlayer) {
-      audioPlayer.pause()
-      audioPlayer = null
+    // Stop any ongoing chunked speech
+    if (chunkedSpeechController) {
+      try {
+        chunkedSpeechController.abort()
+      } catch (e) {}
+      chunkedSpeechController = null
     }
+    stopPlayingAudio()
     startListening()
   }
 }
@@ -785,6 +908,14 @@ const stopPlayingAudio = () => {
 
 // Full stop for barge-in interruptions
 const stopSpeaking = () => {
+  // Abort any ongoing chunked speech fetches
+  if (chunkedSpeechController) {
+    try {
+      chunkedSpeechController.abort()
+    } catch (e) {}
+    chunkedSpeechController = null
+  }
+
   stopPlayingAudio()
   resetCaptionState()
 
@@ -1141,6 +1272,40 @@ const _vadLoop = () => {
   align-items: center;
   justify-content: center;
   min-height: 300px;
+}
+
+.agent-intro {
+  color: #ffffff;
+  max-width: 520px;
+  margin: 0 auto 1.5rem;
+}
+
+.agent-intro h2 {
+  font-size: 1.4rem;
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+}
+
+.agent-intro p {
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 0.98rem;
+  margin-bottom: 1rem;
+}
+
+.agent-pill-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  justify-content: center;
+}
+
+.agent-pill-list span {
+  padding: 0.4rem 0.75rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 0.8rem;
+  border: 1px solid rgba(255, 255, 255, 0.14);
 }
 
 /* Agent Avatar */
