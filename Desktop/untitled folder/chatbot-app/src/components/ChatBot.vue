@@ -152,6 +152,9 @@
 <script setup>
 import { ref, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
 
+const apiBase = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
+const buildApiUrl = (path) => `${apiBase}${path}`
+
 const isOpen = ref(true)
 const isMuted = ref(false)
 
@@ -446,7 +449,7 @@ const speakChunked = async (fullText, wordsPerChunk = 30, autoListenAfter = fals
     }
 
     try {
-      const response = await fetch('http://localhost:3001/api/tts', {
+      const response = await fetch(buildApiUrl('/api/tts'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: chunks[i] }),
@@ -657,7 +660,7 @@ const handleUserSpeech = async (text) => {
       }
     }, 500)
 
-    const response = await fetch('http://localhost:3001/api/chat-stream', {
+    const response = await fetch(buildApiUrl('/api/chat-stream'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -939,7 +942,7 @@ const speak = async (text, autoListenAfter = false) => {
   startMicMonitor()
 
   try {
-    const response = await fetch('http://localhost:3001/api/tts', {
+    const response = await fetch(buildApiUrl('/api/tts'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text })
